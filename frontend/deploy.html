@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arène — déploiement des contrats</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header><h1>Arène <span class="sub">déploiement des contrats</span></h1></header>
+  <main>
+    <section class="card">
+      <h2>Déployer sur <span id="netName"></span></h2>
+      <p>Cette page installe les deux contrats de la plateforme depuis votre MetaMask : un faux USDC gratuit (pour les tests) et le contrat des mini-jeux.
+         Votre compte en devient le propriétaire : c'est lui qui pourra retirer les 2 % de frais. Aucune clé n'est partagée.</p>
+      <p class="muted small">Il faut un peu d'ETH de test sur votre compte (environ 0,0005 ETH suffisent). MetaMask vous demandera de confirmer 2 transactions.</p>
+      <div class="row"><button id="deployBtn">Connecter MetaMask et déployer</button></div>
+      <pre id="log" class="small" style="white-space: pre-wrap"></pre>
+      <div id="done" hidden>
+        <h2>C'est fait ✔</h2>
+        <p>Envoyez ce message à Claude pour que les adresses soient enregistrées sur le site pour tout le monde :</p>
+        <pre id="summary" class="card small" style="white-space: pre-wrap"></pre>
+        <div class="row"><button id="copyBtn" class="ghost">Copier le message</button><a href="./"><button>Aller jouer</button></a></div>
+      </div>
+    </section>
+  </main>
+  <script src="ethers.umd.min.js"></script>
+  <script src="contracts.js"></script>
+  <script src="config.js"></script>
+  <script src="network.js"></script>
+  <script>
+    /* global ethers, NETWORKS, ARENA_ABI, USDC_ABI, ARENA_BYTECODE, USDC_BYTECODE, switchNetwork */
+    const IS_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+    const CHAIN_ID = Number(new URLSearchParams(location.search).get("chain") || (IS_LOCAL ? 31337 : 84532));
+    const cfg = { ...NETWORKS[CHAIN_ID], chainId: CHAIN_ID };
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+    document.getElementById("netName").textContent = cfg.name;
+
+    document.getElementById("deployBtn").onclick = async () => {
+      const btn = document.getElementById("deployBtn");
+      btn.disabled = true;
+      try {
+        if (!window.ethereum) throw new Error("MetaMask n'est pas installé dans ce navigateur (metamask.io).");
+        await window.ethereum.request({ method: "eth_requestAccounts" });
+        await switchNetwork(cfg);
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const signer = await provider.getSigner();
+        const me = await signer.getAddress();
+        const eth = await provider.getBalance(me);
+        log(`Compte : ${me} (${ethers.formatEther(eth)} ETH)`);
+        if (eth === 0n) throw new Error("Ce compte n'a pas d'ETH de test. Récupérez-en sur un robinet (faucet) puis réessayez.");
+
+        log("1/2 Déploiement du faux USDC… confirmez dans MetaMask.");
+        const usdc = await new ethers.ContractFactory(USDC_ABI, USDC_BYTECODE, signer).deploy();
+        await usdc.waitForDeployment();
+        const usdcAddr = await usdc.getAddress();
+        log(`    USDC de test : ${usdcAddr}`);
+
+        log("2/2 Déploiement du contrat des mini-jeux… confirmez dans MetaMask.");
+        const arena = await new ethers.ContractFactory(ARENA_ABI, ARENA_BYTECODE, signer).deploy(usdcAddr, cfg.moveTimeout || 600);
+        await arena.waitForDeployment();
+        const arenaAddr = await arena.getAddress();
+        log(`    Mini-jeux : ${arenaAddr}`);
+
+        const saved = { arena: arenaAddr, usdc: usdcAddr, mockUsdc: true, moveTimeout: cfg.moveTimeout || 600 };
+        localStorage.setItem(`arene-deploiement-${CHAIN_ID}`, JSON.stringify(saved));
+        const summary = `Contrats déployés sur ${cfg.name} (chainId ${CHAIN_ID}) :\narena = ${arenaAddr}\nusdc = ${usdcAddr}\npropriétaire = ${me}`;
+        document.getElementById("summary").textContent = summary;
+        document.getElementById("done").hidden = false;
+        document.getElementById("copyBtn").onclick = () => navigator.clipboard.writeText(summary);
+        if (cfg.explorer) log(`Voir sur l'explorateur : ${cfg.explorer}/address/${arenaAddr}`);
+      } catch (e) {
+        log("Erreur : " + (e.shortMessage || e.message));
+        btn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>

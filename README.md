@@ -25,7 +25,9 @@ Règles communes :
 - `contracts/MiniJeuxArena.sol` : le contrat (annonces, mises, jeux, frais, délais).
 - `contracts/MockUSDC.sol` : faux USDC pour les tests (avec un robinet gratuit).
 - `test/arena.test.js` : 20 tests automatiques.
-- `scripts/deploy.js` : déploiement + génération de `frontend/config.js`.
+- `scripts/deploy.js` : déploiement en ligne de commande + mise à jour de `frontend/config.js`.
+- `scripts/export-frontend.js` : copie les ABI/bytecodes compilés dans `frontend/contracts.js`.
+- `frontend/deploy.html` : déploiement des contrats depuis MetaMask.
 - `frontend/` : site web statique (MetaMask, annonces, plateaux de jeu).
 
 ## Lancer en local
@@ -37,6 +39,9 @@ npx hardhat node                                          # blockchain locale (t
 npx hardhat run scripts/deploy.js --network localhost     # terminal 2
 cd frontend && python3 -m http.server 8080                # puis ouvrir http://localhost:8080
 ```
+Sur `localhost`, le site utilise la blockchain locale ; ailleurs, Base Sepolia (forcer avec `?chain=31337` ou `?chain=84532`).
+```
+```
 Dans MetaMask : ajouter le réseau `http://127.0.0.1:8545` (chainId 31337) et importer une des
 clés de test affichées par `npx hardhat node`.
 
@@ -45,12 +50,17 @@ au lieu de le télécharger.
 
 ## Déployer sur le réseau de test Base Sepolia
 
-```bash
-PRIVATE_KEY=0x... npx hardhat run scripts/deploy.js --network baseSepolia
-```
-Il faut un peu d'ETH de test Base Sepolia sur ce compte (robinets gratuits). Sans `USDC_ADDRESS`,
-le script déploie le faux USDC, ce qui permet aux testeurs de s'en servir gratuitement.
-Ensuite, mettre le dossier `frontend/` sur n'importe quel hébergement statique.
+Le site est publié automatiquement sur GitHub Pages à chaque mise à jour de `main`
+(https://nanogain.github.io/money_game/). Sur ce site, le réseau utilisé est Base Sepolia.
+
+Pour installer les contrats, sans partager aucune clé :
+1. Ouvrir https://nanogain.github.io/money_game/deploy.html avec MetaMask (un peu d'ETH de test sur le compte).
+2. Cliquer « Connecter MetaMask et déployer » et confirmer les 2 transactions.
+   Le compte qui déploie devient propriétaire du contrat (retrait des 2 % de frais).
+3. Reporter les adresses affichées dans `frontend/config.js` (entrée `84532`) pour que tous les joueurs
+   utilisent les mêmes contrats. En attendant, le navigateur qui a déployé les garde en mémoire.
+
+On peut aussi déployer en ligne de commande : `PRIVATE_KEY=0x... npx hardhat run scripts/deploy.js --network baseSepolia`.
 
 ## Avant la production (réseau Base réel)
 
