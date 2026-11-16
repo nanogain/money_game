@@ -62,6 +62,15 @@ Pour installer les contrats, sans partager aucune clé :
 
 On peut aussi déployer en ligne de commande : `PRIVATE_KEY=0x... npx hardhat run scripts/deploy.js --network baseSepolia`.
 
+### Déploiement actuel (Base Sepolia, 16/11/2026)
+
+- Contrat des mini-jeux : [`0x42D9F725b51D9A482697b748453c3934ad9e31cb`](https://sepolia.basescan.org/address/0x42D9F725b51D9A482697b748453c3934ad9e31cb)
+- USDC de test : [`0x479F83D2806CA584E678a5e39F982F17Fc5BD6Ad`](https://sepolia.basescan.org/address/0x479F83D2806CA584E678a5e39F982F17Fc5BD6Ad)
+- Propriétaire (retrait des frais) : `0x032A5284Fc32fA6671Baaf9221dA8dc909Cf9B64`
+
+ETH de test gratuit : robinet Coinbase, https://portal.cdp.coinbase.com/onchain-tools/faucet
+(le robinet Alchemy exige de l'activité sur le réseau principal).
+
 ## Avant la production (réseau Base réel)
 
 - Utiliser le vrai USDC de Base : `USDC_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
