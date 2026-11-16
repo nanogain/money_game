@@ -6,7 +6,7 @@ const CHAIN_ID = Number(new URLSearchParams(location.search).get("chain") || (IS
 const SAVED = JSON.parse(localStorage.getItem(`arene-deploiement-${CHAIN_ID}`) || "null");
 const APP_CONFIG = { ...NETWORKS[CHAIN_ID], ...(NETWORKS[CHAIN_ID]?.arena ? {} : SAVED || {}), chainId: CHAIN_ID };
 APP_CONFIG.network = APP_CONFIG.name;
-const GAMES = ["Pierre-Feuille-Ciseaux", "Morpion", "Puissance 4"];
+const GAMES = ["Pierre-Feuille-Ciseaux", "Morpion", "Puissance 4", "Duel de dés", "Bataille navale"];
 const STATUS = ["Ouverte", "En cours", "Terminée", "Annulée"];
 const PFC_MOVES = { 1: "✊", 2: "✋", 3: "✌️" };
 const PFC_NAMES = { 1: "Pierre", 2: "Feuille", 3: "Ciseaux" };
@@ -255,7 +255,7 @@ function renderLists() {
       if (m.winner === ZERO) tag = "Match nul";
       else if (same(m.winner, state.account)) { tag = "Gagnée"; cls = "win"; }
       else { tag = "Perdue"; cls = "lose"; }
-    } else if (st === 1 && Number(m.game) !== 0 && same(m.turn, state.account)) tag = "À vous de jouer";
+    } else if (st === 1 && [1, 2, 4].includes(Number(m.game)) && same(m.turn, state.account)) tag = "À vous de jouer";
     const el = document.createElement("div");
     el.className = "item";
     const vs = same(m.creator, state.account) ? m.opponent : m.creator;
@@ -315,7 +315,10 @@ async function renderGame() {
       : same(m.winner, state.account) ? `Victoire ! Vous avez reçu ${fmt(net)} USDC.` : `Défaite. ${short(m.winner)} a remporté ${fmt(net)} USDC.`;
   } else if (st === 0) status = "En attente d'un adversaire.";
 
-  if (game === 0) {
+  if (game >= 3) {
+    // Duel de dés et Bataille navale : voir games-extra.js
+    status = (await renderExtraGame(m, { game, st, me, late, mm, board, actions })) || status;
+  } else if (game === 0) {
     const s = (await state.readArena.pfc(m.id)).toObject();
     const round = Number(m.moves);
     const myCommit = me === 1 ? s.commitCreator : s.commitOpponent;

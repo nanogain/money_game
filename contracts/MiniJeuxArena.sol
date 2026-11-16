@@ -13,7 +13,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract MiniJeuxArena is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
-    enum GameType { PierreFeuilleCiseaux, Morpion, Puissance4 }
+    enum GameType { PierreFeuilleCiseaux, Morpion, Puissance4, DuelDeDes, BatailleNavale }
     enum Status { Open, Active, Finished, Cancelled }
 
     struct Match {
@@ -37,6 +37,38 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
         uint8 revealOpponent;
     }
 
+    // Duel de dés : chaque joueur engage un secret aléatoire, puis le révèle.
+    // Les dés sont tirés de la combinaison des deux secrets : aucun joueur ne peut choisir le résultat.
+    struct DiceState {
+        bytes32 commitCreator;
+        bytes32 commitOpponent;
+        bytes32 secretCreator;
+        bytes32 secretOpponent;
+        bool revealedCreator;
+        bool revealedOpponent;
+        uint8 lastDieCreator;  // dernier lancer (affichage)
+        uint8 lastDieOpponent;
+    }
+
+    // Bataille navale sur 8x8 (cases 0-63 = ligne*8 + colonne), flotte : 4, 3, 3, 2 cases.
+    // Chaque joueur engage l'empreinte de son plateau, annonce « touché / raté » à chaque tir,
+    // puis révèle son plateau à la fin : le contrat vérifie la flotte et toutes ses annonces.
+    struct NavalState {
+        bytes32 commitCreator;
+        bytes32 commitOpponent;
+        uint64 shotsByCreator;  // cases visées par le créateur (sur le plateau adverse)
+        uint64 hitsByCreator;   // parmi elles, celles annoncées « touché » par l'adversaire
+        uint64 shotsByOpponent;
+        uint64 hitsByOpponent;
+        uint8 phase;            // 0 placement, 1 combat, 2 révélation
+        uint8 pendingCell;      // dernier tir en attente de réponse
+        bool hasPending;
+        uint8 revealCreator;    // 0 pas encore, 1 honnête, 2 tricheur
+        uint8 revealOpponent;
+    }
+
+    uint8 public constant NAVAL_SHIP_CELLS = 12; // 4 + 3 + 3 + 2
+
     uint256 public constant FEE_BPS = 200; // 2 %
     uint256 public constant BPS = 10_000;
 
@@ -47,6 +79,8 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
     uint256 public feesAccrued;
     mapping(uint256 => Match) public matches;
     mapping(uint256 => PfcState) public pfc;
+    mapping(uint256 => DiceState) public dice;
+    mapping(uint256 => NavalState) public naval;
 
     event MatchCreated(uint256 indexed id, address indexed creator, GameType game, uint256 stake);
     event MatchJoined(uint256 indexed id, address indexed opponent);
@@ -57,6 +91,13 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
     event PfcRoundDraw(uint256 indexed id, uint8 round);
     event MatchFinished(uint256 indexed id, address winner, uint256 payout, uint256 fee);
     event FeesWithdrawn(address to, uint256 amount);
+    event DiceCommitted(uint256 indexed id, address indexed player, uint8 round);
+    event DiceRevealed(uint256 indexed id, address indexed player, uint8 round);
+    event DiceRolled(uint256 indexed id, uint8 round, uint8 dieCreator, uint8 dieOpponent);
+    event NavalBoardCommitted(uint256 indexed id, address indexed player);
+    event NavalShot(uint256 indexed id, address indexed shooter, uint8 cell);
+    event NavalAnswered(uint256 indexed id, address indexed defender, uint8 cell, bool hit);
+    event NavalRevealed(uint256 indexed id, address indexed player, bool honest);
 
     error InvalidState();
     error NotPlayer();
@@ -113,7 +154,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
     /// @notice Jouer un coup. Morpion : case 0-8. Puissance 4 : colonne 0-6.
     function play(uint256 id, uint8 position) external nonReentrant {
         Match storage m = matches[id];
-        if (m.status != Status.Active || m.game == GameType.PierreFeuilleCiseaux) revert InvalidState();
+        if (m.status != Status.Active || (m.game != GameType.Morpion && m.game != GameType.Puissance4)) revert InvalidState();
         if (msg.sender != m.turn) revert NotYourTurn();
         uint256 mark = msg.sender == m.creator ? 1 : 2;
 
@@ -206,6 +247,254 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
         }
     }
 
+    // ------------------------------------------------------------------ duel de dés
+
+    /// @notice Empreinte à envoyer à commitDice. Le secret (32 octets aléatoires) reste dans le navigateur.
+    ///         À calculer dans le navigateur (pas par un appel au contrat) pour que le secret ne quitte pas l'appareil.
+    function diceHash(uint256 id, uint8 round, address player, bytes32 secret) public view returns (bytes32) {
+        return keccak256(abi.encode("des", address(this), block.chainid, id, round, player, secret));
+    }
+
+    function commitDice(uint256 id, bytes32 commitment) external nonReentrant {
+        Match storage m = matches[id];
+        if (m.status != Status.Active || m.game != GameType.DuelDeDes) revert InvalidState();
+        DiceState storage d = dice[id];
+        if (commitment == 0) revert InvalidMove(); // sinon on pourrait repousser le délai indéfiniment
+        if (msg.sender == m.creator) {
+            if (d.commitCreator != 0) revert InvalidState();
+            d.commitCreator = commitment;
+        } else if (msg.sender == m.opponent) {
+            if (d.commitOpponent != 0) revert InvalidState();
+            d.commitOpponent = commitment;
+        } else revert NotPlayer();
+        m.lastActionAt = uint64(block.timestamp);
+        emit DiceCommitted(id, msg.sender, m.moves);
+    }
+
+    function revealDice(uint256 id, bytes32 secret) external nonReentrant {
+        Match storage m = matches[id];
+        if (m.status != Status.Active || m.game != GameType.DuelDeDes) revert InvalidState();
+        DiceState storage d = dice[id];
+        if (d.commitCreator == 0 || d.commitOpponent == 0) revert InvalidState();
+        bytes32 h = diceHash(id, m.moves, msg.sender, secret);
+        if (msg.sender == m.creator) {
+            if (d.revealedCreator || h != d.commitCreator) revert InvalidMove();
+            d.revealedCreator = true;
+            d.secretCreator = secret;
+        } else if (msg.sender == m.opponent) {
+            if (d.revealedOpponent || h != d.commitOpponent) revert InvalidMove();
+            d.revealedOpponent = true;
+            d.secretOpponent = secret;
+        } else revert NotPlayer();
+        m.lastActionAt = uint64(block.timestamp);
+        emit DiceRevealed(id, msg.sender, m.moves);
+
+        if (d.revealedCreator && d.revealedOpponent) {
+            uint256 r = uint256(keccak256(abi.encode(d.secretCreator, d.secretOpponent)));
+            uint8 a = uint8(r % 6) + 1;
+            uint8 b = uint8((r >> 128) % 6) + 1;
+            uint8 round = m.moves;
+            emit DiceRolled(id, round, a, b);
+            if (a == b) {
+                // égalité : on relance (nouvelle manche, nouveaux secrets)
+                delete dice[id];
+                dice[id].lastDieCreator = a;
+                dice[id].lastDieOpponent = b;
+                m.moves = round + 1;
+            } else {
+                d.lastDieCreator = a;
+                d.lastDieOpponent = b;
+                _finish(id, a > b ? m.creator : m.opponent);
+            }
+        }
+    }
+
+    function _diceTimeout(uint256 id) internal {
+        Match storage m = matches[id];
+        DiceState storage d = dice[id];
+        bool c;
+        bool o;
+        if (d.commitCreator == 0 || d.commitOpponent == 0) {
+            c = d.commitCreator != 0;
+            o = d.commitOpponent != 0;
+        } else {
+            c = d.revealedCreator;
+            o = d.revealedOpponent;
+        }
+        if (c && !o) _finish(id, m.creator);
+        else if (o && !c) _finish(id, m.opponent);
+        else _finish(id, address(0));
+    }
+
+    // ------------------------------------------------------------------ bataille navale
+
+    /// @notice Empreinte du plateau à envoyer à commitNavalBoard. Bateaux dans l'ordre 4, 3, 3, 2 cases ;
+    ///         (x, y) = case de départ (colonne, ligne), vertical = vers le bas, sinon vers la droite.
+    ///         À calculer dans le navigateur (pas par un appel au contrat) pour garder le plateau secret.
+    function navalHash(
+        uint256 id,
+        address player,
+        uint8[4] calldata xs,
+        uint8[4] calldata ys,
+        bool[4] calldata vertical,
+        bytes32 salt
+    ) public view returns (bytes32) {
+        return keccak256(abi.encode("navale", address(this), block.chainid, id, player, xs, ys, vertical, salt));
+    }
+
+    /// @notice Placement : chaque joueur engage l'empreinte de son plateau (qui reste secret).
+    function commitNavalBoard(uint256 id, bytes32 commitment) external nonReentrant {
+        Match storage m = matches[id];
+        NavalState storage n = naval[id];
+        if (m.status != Status.Active || m.game != GameType.BatailleNavale || n.phase != 0) revert InvalidState();
+        if (commitment == 0) revert InvalidMove();
+        if (msg.sender == m.creator) {
+            if (n.commitCreator != 0) revert InvalidState();
+            n.commitCreator = commitment;
+        } else if (msg.sender == m.opponent) {
+            if (n.commitOpponent != 0) revert InvalidState();
+            n.commitOpponent = commitment;
+        } else revert NotPlayer();
+        m.lastActionAt = uint64(block.timestamp);
+        emit NavalBoardCommitted(id, msg.sender);
+        if (n.commitCreator != 0 && n.commitOpponent != 0) n.phase = 1; // l'accepteur (m.turn) tire en premier
+    }
+
+    /// @notice Tour de jeu : répondre au tir adverse (touché ou non), puis tirer sur la case `cell`.
+    ///         Au tout premier tir, `prevHit` est ignoré. Si cette réponse donne la victoire à
+    ///         l'adversaire (ou si tout le plateau a été visé), la partie passe à la révélation.
+    function navalTurn(uint256 id, bool prevHit, uint8 cell) external nonReentrant {
+        Match storage m = matches[id];
+        NavalState storage n = naval[id];
+        if (m.status != Status.Active || m.game != GameType.BatailleNavale || n.phase != 1) revert InvalidState();
+        if (msg.sender != m.turn) revert NotYourTurn();
+        bool isCreator = msg.sender == m.creator;
+        m.lastActionAt = uint64(block.timestamp);
+
+        if (n.hasPending) {
+            n.hasPending = false;
+            uint64 bit = uint64(1) << n.pendingCell;
+            if (prevHit) {
+                if (isCreator) n.hitsByOpponent |= bit;
+                else n.hitsByCreator |= bit;
+            }
+            emit NavalAnswered(id, msg.sender, n.pendingCell, prevHit);
+            uint64 otherHits = isCreator ? n.hitsByOpponent : n.hitsByCreator;
+            if (_popcount(otherHits) >= NAVAL_SHIP_CELLS) {
+                n.phase = 2;
+                m.turn = address(0);
+                return;
+            }
+        }
+
+        uint64 myShots = isCreator ? n.shotsByCreator : n.shotsByOpponent;
+        if (myShots == type(uint64).max) {
+            // plateau adverse entièrement visé sans couler la flotte : quelqu'un a menti, on vérifie
+            n.phase = 2;
+            m.turn = address(0);
+            return;
+        }
+        if (cell > 63 || (myShots >> cell) & 1 == 1) revert InvalidMove();
+        if (isCreator) n.shotsByCreator = myShots | (uint64(1) << cell);
+        else n.shotsByOpponent = myShots | (uint64(1) << cell);
+        n.pendingCell = cell;
+        n.hasPending = true;
+        m.turn = isCreator ? m.opponent : m.creator;
+        emit NavalShot(id, msg.sender, cell);
+    }
+
+    /// @notice Fin de partie : chacun révèle son plateau. Le contrat vérifie que la flotte est valide
+    ///         et que toutes les annonces « touché / raté » étaient vraies. Un tricheur perd.
+    function revealNavalBoard(
+        uint256 id,
+        uint8[4] calldata xs,
+        uint8[4] calldata ys,
+        bool[4] calldata vertical,
+        bytes32 salt
+    ) external nonReentrant {
+        Match storage m = matches[id];
+        NavalState storage n = naval[id];
+        if (m.status != Status.Active || m.game != GameType.BatailleNavale || n.phase != 2) revert InvalidState();
+        bool isCreator = msg.sender == m.creator;
+        if (!isCreator && msg.sender != m.opponent) revert NotPlayer();
+        if ((isCreator ? n.revealCreator : n.revealOpponent) != 0) revert InvalidState();
+        if (navalHash(id, msg.sender, xs, ys, vertical, salt) != (isCreator ? n.commitCreator : n.commitOpponent)) {
+            revert InvalidMove(); // mauvais plateau ou mauvais sel : on peut réessayer
+        }
+
+        (bool valid, uint64 ships) = _navalBoard(xs, ys, vertical);
+        // Les tirs reçus par ce joueur et ses annonces :
+        uint64 shotsReceived = isCreator ? n.shotsByOpponent : n.shotsByCreator;
+        uint64 hitsAnnounced = isCreator ? n.hitsByOpponent : n.hitsByCreator;
+        bool honest = valid && (ships & shotsReceived) == hitsAnnounced;
+        if (isCreator) n.revealCreator = honest ? 1 : 2;
+        else n.revealOpponent = honest ? 1 : 2;
+        m.lastActionAt = uint64(block.timestamp);
+        emit NavalRevealed(id, msg.sender, honest);
+
+        if (!honest) {
+            // tricheur démasqué : l'autre gagne, sauf s'il a déjà été démasqué lui aussi
+            uint8 other = isCreator ? n.revealOpponent : n.revealCreator;
+            _finish(id, other == 2 ? address(0) : (isCreator ? m.opponent : m.creator));
+        } else if (n.revealCreator == 1 && n.revealOpponent == 1) {
+            _finish(id, _navalLeader(m, n));
+        }
+    }
+
+    function _navalTimeout(uint256 id) internal {
+        Match storage m = matches[id];
+        NavalState storage n = naval[id];
+        if (n.phase == 0) {
+            bool c = n.commitCreator != 0;
+            bool o = n.commitOpponent != 0;
+            if (c && !o) _finish(id, m.creator);
+            else if (o && !c) _finish(id, m.opponent);
+            else _finish(id, address(0));
+        } else if (n.phase == 1) {
+            _finish(id, m.turn == m.creator ? m.opponent : m.creator); // celui qui devait jouer perd
+        } else {
+            // révélation : un joueur honnête l'emporte sur celui qui n'a pas révélé
+            if (n.revealCreator == 1 && n.revealOpponent == 0) _finish(id, m.creator);
+            else if (n.revealOpponent == 1 && n.revealCreator == 0) _finish(id, m.opponent);
+            else _finish(id, address(0));
+        }
+    }
+
+    /// @dev Celui qui a coulé toute la flotte adverse (address(0) si personne).
+    function _navalLeader(Match storage m, NavalState storage n) internal view returns (address) {
+        if (_popcount(n.hitsByCreator) >= NAVAL_SHIP_CELLS) return m.creator;
+        if (_popcount(n.hitsByOpponent) >= NAVAL_SHIP_CELLS) return m.opponent;
+        return address(0);
+    }
+
+    function _navalBoard(uint8[4] calldata xs, uint8[4] calldata ys, bool[4] calldata vertical)
+        internal
+        pure
+        returns (bool valid, uint64 board)
+    {
+        uint8[4] memory sizes = [4, 3, 3, 2];
+        for (uint256 s = 0; s < 4; s++) {
+            uint256 x = xs[s];
+            uint256 y = ys[s];
+            uint256 len = sizes[s];
+            if (vertical[s] ? (x > 7 || y + len > 8) : (y > 7 || x + len > 8)) return (false, 0);
+            for (uint256 k = 0; k < len; k++) {
+                uint256 cell = vertical[s] ? (y + k) * 8 + x : y * 8 + x + k;
+                uint64 bit = uint64(1) << uint64(cell);
+                if (board & bit != 0) return (false, 0); // bateaux superposés
+                board |= bit;
+            }
+        }
+        return (true, board);
+    }
+
+    function _popcount(uint64 v) internal pure returns (uint8 c) {
+        while (v != 0) {
+            v &= v - 1;
+            c++;
+        }
+    }
+
     // ------------------------------------------------------------------ abandon et délais
 
     /// @notice Abandonner : l'adversaire gagne.
@@ -224,6 +513,9 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
         Match storage m = matches[id];
         if (m.status != Status.Active) revert InvalidState();
         if (block.timestamp <= m.lastActionAt + moveTimeout) revert TooEarly();
+
+        if (m.game == GameType.DuelDeDes) return _diceTimeout(id);
+        if (m.game == GameType.BatailleNavale) return _navalTimeout(id);
 
         if (m.game != GameType.PierreFeuilleCiseaux) {
             _finish(id, m.turn == m.creator ? m.opponent : m.creator);
