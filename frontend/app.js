@@ -1,4 +1,11 @@
-/* global ethers, APP_CONFIG, ARENA_ABI, USDC_ABI */
+/* global ethers, NETWORKS, ARENA_ABI, USDC_ABI */
+// Réseau utilisé : blockchain locale si le site tourne sur localhost, Base Sepolia sinon (?chain=… pour forcer).
+const IS_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const CHAIN_ID = Number(new URLSearchParams(location.search).get("chain") || (IS_LOCAL ? 31337 : 84532));
+// Adresses : celles de config.js, ou celles enregistrées par deploy.html dans ce navigateur.
+const SAVED = JSON.parse(localStorage.getItem(`arene-deploiement-${CHAIN_ID}`) || "null");
+const APP_CONFIG = { ...NETWORKS[CHAIN_ID], ...(NETWORKS[CHAIN_ID]?.arena ? {} : SAVED || {}), chainId: CHAIN_ID };
+APP_CONFIG.network = APP_CONFIG.name;
 const GAMES = ["Pierre-Feuille-Ciseaux", "Morpion", "Puissance 4"];
 const STATUS = ["Ouverte", "En cours", "Terminée", "Annulée"];
 const PFC_MOVES = { 1: "✊", 2: "✋", 3: "✌️" };
@@ -56,13 +63,14 @@ async function tx(label, fn) {
 // ------------------------------------------------------------------ wallet
 
 async function connect() {
-  if (!window.ethereum) return notify("Aucun wallet détecté. Installez MetaMask.", true);
+  if (!window.ethereum) return notify("Aucun wallet détecté. Installez MetaMask (metamask.io), puis rechargez la page.", true);
+  if (!APP_CONFIG.arena) return notify("Les contrats ne sont pas encore déployés sur ce réseau. Ouvrez la page deploy.html pour les déployer.", true);
   state.provider = new ethers.BrowserProvider(window.ethereum);
   await state.provider.send("eth_requestAccounts", []);
   const net = await state.provider.getNetwork();
   if (Number(net.chainId) !== APP_CONFIG.chainId) {
     try {
-      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x" + APP_CONFIG.chainId.toString(16) }] });
+      await switchNetwork(APP_CONFIG);
       state.provider = new ethers.BrowserProvider(window.ethereum);
     } catch {
       return notify(`Mauvais réseau : passez votre wallet sur le réseau ${APP_CONFIG.network} (chainId ${APP_CONFIG.chainId}).`, true);
@@ -139,7 +147,12 @@ async function refresh() {
       state.provider.getBlock("latest"),
     ]);
     state.now = Number(block.timestamp);
-    $("balance").textContent = `${fmt(bal)} USDC`;
+    const eth = await state.provider.getBalance(state.account);
+    $("balance").textContent = `${fmt(bal)} USDC · ${Number(ethers.formatEther(eth)).toFixed(4)} ETH`;
+    if (eth === 0n && !state.warnedEth) {
+      state.warnedEth = true;
+      notify("Votre wallet n'a pas d'ETH : il en faut un tout petit peu pour payer les frais de transaction. Sur le réseau de test, il est gratuit (voir le guide).", true);
+    }
     const n = Number(count);
     const list = [];
     for (let from = 1; from <= n; from += 100) {

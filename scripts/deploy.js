@@ -1,9 +1,10 @@
-// Déploie le faux USDC (si besoin) et le contrat des mini-jeux, puis écrit frontend/config.js.
+// Déploie le faux USDC (si besoin) et le contrat des mini-jeux, puis met à jour frontend/config.js.
 // Usage : npx hardhat run scripts/deploy.js --network localhost
-//         USDC_ADDRESS=0x... MOVE_TIMEOUT=600 npx hardhat run scripts/deploy.js --network baseSepolia
+// (Pour Base Sepolia, le plus simple est la page frontend/deploy.html, depuis MetaMask.)
 const fs = require("fs");
 const path = require("path");
 const hre = require("hardhat");
+const { exportFrontend } = require("./export-frontend");
 
 async function main() {
   const { ethers, network } = hre;
@@ -25,13 +26,16 @@ async function main() {
   const arenaAddress = await arena.getAddress();
   console.log(`MiniJeuxArena : ${arenaAddress} (délai par coup : ${timeout} s)`);
 
+  await exportFrontend();
   const { chainId } = await ethers.provider.getNetwork();
-  const arenaAbi = (await hre.artifacts.readArtifact("MiniJeuxArena")).abi;
-  const usdcAbi = (await hre.artifacts.readArtifact("MockUSDC")).abi;
-  const config = { chainId: Number(chainId), network: network.name, arena: arenaAddress, usdc: usdcAddress, mockUsdc: mock, moveTimeout: timeout };
-  const out = `// Généré par scripts/deploy.js\nwindow.APP_CONFIG = ${JSON.stringify(config, null, 2)};\nwindow.ARENA_ABI = ${JSON.stringify(arenaAbi)};\nwindow.USDC_ABI = ${JSON.stringify(usdcAbi)};\n`;
-  fs.writeFileSync(path.join(__dirname, "..", "frontend", "config.js"), out);
-  console.log("frontend/config.js écrit.");
+  const file = path.join(__dirname, "..", "frontend", "config.js");
+  const src = fs.readFileSync(file, "utf8");
+  const json = src.slice(src.indexOf("{"), src.lastIndexOf("}") + 1);
+  const nets = JSON.parse(json);
+  const key = String(chainId);
+  nets[key] = { ...(nets[key] || { name: network.name, rpc: "", explorer: "" }), arena: arenaAddress, usdc: usdcAddress, mockUsdc: mock, moveTimeout: timeout };
+  fs.writeFileSync(file, src.slice(0, src.indexOf("{")) + JSON.stringify(nets, null, 2) + ";\n");
+  console.log("frontend/config.js mis à jour.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
