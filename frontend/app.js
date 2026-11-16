@@ -62,11 +62,31 @@ async function tx(label, fn) {
 
 // ------------------------------------------------------------------ wallet
 
-async function connect() {
+// Le site mémorise si l'utilisateur s'est déconnecté, pour ne pas le reconnecter tout seul.
+const DISCONNECTED_KEY = "arene-deconnecte";
+
+// pick = true : ouvre la fenêtre MetaMask de choix des comptes (même si un compte est déjà autorisé).
+// pick = false : reconnexion silencieuse au chargement, seulement avec un compte déjà autorisé.
+async function connect({ pick = false } = {}) {
   if (!window.ethereum) return notify("Aucun wallet détecté. Installez MetaMask (metamask.io), puis rechargez la page.", true);
   if (!APP_CONFIG.arena) return notify("Les contrats ne sont pas encore déployés sur ce réseau. Ouvrez la page deploy.html pour les déployer.", true);
+  if (pick) {
+    try {
+      await window.ethereum.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
+    } catch (e) {
+      // Wallet qui ne gère pas la fenêtre de choix : demande classique.
+      if (e?.code === 4001) throw e;
+      await window.ethereum.request({ method: "eth_requestAccounts" });
+    }
+    localStorage.removeItem(DISCONNECTED_KEY);
+  }
+  const accounts = await window.ethereum.request({ method: "eth_accounts" });
+  if (!accounts.length) return pick ? notify("Aucun compte autorisé dans MetaMask.", true) : undefined;
+  await useAccount(accounts[0]);
+}
+
+async function useAccount(account) {
   state.provider = new ethers.BrowserProvider(window.ethereum);
-  await state.provider.send("eth_requestAccounts", []);
   const net = await state.provider.getNetwork();
   if (Number(net.chainId) !== APP_CONFIG.chainId) {
     try {
@@ -76,16 +96,50 @@ async function connect() {
       return notify(`Mauvais réseau : passez votre wallet sur le réseau ${APP_CONFIG.network} (chainId ${APP_CONFIG.chainId}).`, true);
     }
   }
-  state.signer = await state.provider.getSigner();
+  state.signer = await state.provider.getSigner(account);
   state.account = await state.signer.getAddress();
   state.arena = new ethers.Contract(APP_CONFIG.arena, ARENA_ABI, state.signer);
   state.usdc = new ethers.Contract(APP_CONFIG.usdc, USDC_ABI, state.signer);
   state.readArena = state.arena;
+  state.current = null;
+  state.warnedEth = false;
+  $("gameCard").hidden = true;
   $("account").textContent = short(state.account);
-  $("connectBtn").classList.add("hidden");
-  $("faucetBtn").classList.toggle("hidden", !APP_CONFIG.mockUsdc);
-  if (window.ethereum.on) window.ethereum.on("accountsChanged", () => location.reload());
+  $("account").title = state.account;
+  setConnectedUi(true);
   await refresh();
+}
+
+async function disconnect() {
+  // Retire l'autorisation donnée au site dans MetaMask (si le wallet le permet), puis vide l'affichage.
+  try { await window.ethereum?.request({ method: "wallet_revokePermissions", params: [{ eth_accounts: {} }] }); } catch { /* ancien wallet */ }
+  localStorage.setItem(DISCONNECTED_KEY, "1");
+  Object.assign(state, { provider: null, signer: null, account: null, arena: null, usdc: null, readArena: null, matches: [], current: null });
+  $("account").textContent = "Non connecté";
+  $("account").title = "";
+  $("balance").textContent = "";
+  $("gameCard").hidden = true;
+  $("openList").innerHTML = "";
+  $("myList").innerHTML = "";
+  setConnectedUi(false);
+  notify("Déconnecté. Cliquez « Connecter le wallet » pour choisir un compte.");
+}
+
+function setConnectedUi(connected) {
+  $("connectBtn").classList.toggle("hidden", connected);
+  $("switchBtn").classList.toggle("hidden", !connected);
+  $("disconnectBtn").classList.toggle("hidden", !connected);
+  $("faucetBtn").classList.toggle("hidden", !connected || !APP_CONFIG.mockUsdc);
+}
+
+// Changement de compte dans MetaMask : on suit le compte actif, sans recharger la page.
+if (window.ethereum?.on) {
+  window.ethereum.on("accountsChanged", (accounts) => {
+    if (localStorage.getItem(DISCONNECTED_KEY)) return;
+    if (!accounts.length) return disconnect();
+    if (!same(accounts[0], state.account)) useAccount(accounts[0]).catch((e) => notify(errMsg(e), true));
+  });
+  window.ethereum.on("chainChanged", () => location.reload());
 }
 
 async function ensureAllowance(amount) {
@@ -159,6 +213,7 @@ async function refresh() {
       const chunk = await state.readArena.getMatches(from, 100);
       chunk.forEach((m, i) => list.push({ id: from + i, ...m.toObject() }));
     }
+    if (!state.account) return; // déconnecté pendant le chargement
     state.matches = list;
     renderLists();
     if (state.current) await renderGame();
@@ -325,10 +380,12 @@ async function renderGame() {
 
 // ------------------------------------------------------------------ démarrage
 
-$("connectBtn").onclick = () => connect().catch((e) => notify(errMsg(e), true));
+$("connectBtn").onclick = () => connect({ pick: true }).catch((e) => notify(errMsg(e), true));
+$("switchBtn").onclick = () => connect({ pick: true }).catch((e) => notify(errMsg(e), true));
+$("disconnectBtn").onclick = () => disconnect();
 $("createBtn").onclick = () => createMatch().catch(() => {});
 $("closeGame").onclick = () => { state.current = null; $("gameCard").hidden = true; };
 $("faucetBtn").onclick = () => tx("USDC de test", () => state.usdc.faucet(ethers.parseUnits("1000", DECIMALS))).catch(() => {});
 $("footer").textContent = `Contrat ${short(APP_CONFIG.arena)} · réseau ${APP_CONFIG.network} · frais plateforme 2 %`;
 setInterval(() => { if (!state.busy) refresh(); }, 3000);
-if (window.ethereum?.selectedAddress || window.ethereum?.isTestShim) connect().catch(() => {});
+if (!localStorage.getItem(DISCONNECTED_KEY)) connect().catch(() => {});
