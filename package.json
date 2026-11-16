@@ -1,0 +1,22 @@
+{
+  "name": "arene-minijeux",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:base-sepolia": "hardhat run scripts/deploy.js --network baseSepolia",
+    "front": "cd frontend && python3 -m http.server 8080"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.6.1",
+    "hardhat": "^2.29.2",
+    "solc": "^0.8.24"
+  }
+}

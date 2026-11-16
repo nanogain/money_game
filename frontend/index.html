@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arène — mini-jeux avec mises</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Arène <span class="sub">mini-jeux en duel, mises en USDC</span></h1>
+    <div id="wallet">
+      <span id="account" class="muted">Non connecté</span>
+      <span id="balance"></span>
+      <button id="faucetBtn" class="ghost hidden">+1 000 USDC de test</button>
+      <button id="connectBtn">Connecter le wallet</button>
+    </div>
+  </header>
+
+  <div id="notice" class="notice hidden"></div>
+
+  <main>
+    <section class="card" id="createCard">
+      <h2>Publier une annonce</h2>
+      <div class="row">
+        <label>Jeu
+          <select id="gameSelect">
+            <option value="0">Pierre-Feuille-Ciseaux</option>
+            <option value="1">Morpion</option>
+            <option value="2">Puissance 4</option>
+          </select>
+        </label>
+        <label>Mise (USDC)
+          <input id="stakeInput" type="number" min="0.01" step="0.01" value="5" />
+        </label>
+        <button id="createBtn">Publier</button>
+      </div>
+      <p class="muted small">Le gagnant reçoit les deux mises moins 2 % de frais. Match nul : chacun récupère sa mise.</p>
+    </section>
+
+    <section class="card" id="gameCard" hidden>
+      <div class="game-head">
+        <h2 id="gameTitle"></h2>
+        <button id="closeGame" class="ghost">Fermer</button>
+      </div>
+      <p id="gameStatus"></p>
+      <div id="gameBoard"></div>
+      <div class="row" id="gameActions"></div>
+    </section>
+
+    <section class="card">
+      <h2>Annonces ouvertes</h2>
+      <div id="openList" class="list"></div>
+    </section>
+
+    <section class="card">
+      <h2>Mes parties</h2>
+      <div id="myList" class="list"></div>
+    </section>
+  </main>
+
+  <footer class="muted small" id="footer"></footer>
+
+  <script src="ethers.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
