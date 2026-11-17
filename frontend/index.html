@@ -18,6 +18,7 @@
       <div class="who">
         <span id="account" class="muted">Non connecté</span>
         <span id="balance" class="small"></span>
+        <span id="sessionInfo" class="small session-info"></span>
       </div>
       <div class="wallet-actions">
         <button id="faucetBtn" class="ghost hidden">+1 000 USDC de test</button>
@@ -41,6 +42,25 @@
         <li id="step2"><span class="dot"></span><div><strong>Recevoir un peu d'ETH de test</strong><span class="muted small" id="step2Txt"></span></div></li>
         <li id="step3"><span class="dot"></span><div><strong>Recevoir des USDC de test</strong><span class="muted small" id="step3Txt"></span></div></li>
       </ol>
+    </section>
+
+    <section class="card session" id="sessionCard" hidden>
+      <h2>⚡ Jouer sans confirmation</h2>
+      <p class="muted small" id="sessionWhy"></p>
+      <div class="row">
+        <label>Budget de mises (USDC)
+          <input id="sessionBudget" type="number" min="1" step="1" value="100" />
+        </label>
+        <label>Durée
+          <select id="sessionDays">
+            <option value="1">1 jour</option>
+            <option value="7">7 jours</option>
+            <option value="30">30 jours</option>
+          </select>
+        </label>
+        <button id="sessionBtn">Activer (1 confirmation)</button>
+      </div>
+      <p class="muted small">Une clé jetable, gardée dans ce navigateur, joue pour vous. Elle ne peut engager des mises que dans la limite de ce budget et de cette durée ; vos gains reviennent toujours sur votre wallet, et elle ne peut rien retirer.</p>
     </section>
 
     <section class="turn-banner hidden" id="turnBanner"></section>

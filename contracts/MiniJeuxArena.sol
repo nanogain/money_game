@@ -92,16 +92,21 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     ///         l'émetteur du jeton). Récupérables avec withdraw().
     mapping(address => uint256) public owed;
 
-    /// @notice Clé de session : une adresse jetable (générée et gardée dans le navigateur) que
-    ///         chaque joueur autorise, pour une partie donnée, à jouer ses coups à sa place.
-    ///         Les coups partent alors sans fenêtre de confirmation du wallet.
-    ///         La clé ne peut QUE jouer cette partie (coups, révélations, abandon, annulation de
-    ///         l'annonce) : elle ne touche jamais aux fonds, les gains vont toujours au joueur.
-    struct SessionKeys {
-        address creator;
-        address opponent;
+    /// @notice Session de jeu : à la connexion, le joueur autorise en UNE transaction une clé
+    ///         jetable (générée et gardée dans son navigateur). Pendant la durée choisie, la clé
+    ///         peut publier et relever des défis en engageant les mises du joueur, dans la limite
+    ///         d'un budget, puis jouer ses coups : plus aucune fenêtre de confirmation du wallet.
+    ///         La clé ne peut envoyer de l'argent que dans des parties : mises prélevées sur le
+    ///         wallet du joueur, gains et remboursements toujours versés au wallet du joueur.
+    ///         Elle ne peut ni retirer, ni changer de session, ni augmenter son budget.
+    struct Session {
+        address key;
+        uint64 expiresAt;  // après cette date, la clé ne peut plus engager de nouvelles mises
+        uint256 budget;    // total des mises que la clé peut encore engager
     }
-    mapping(uint256 => SessionKeys) public sessionKeys;
+    mapping(address => Session) public sessions;   // joueur => session
+    mapping(address => address) public sessionOwner; // clé => joueur
+    uint64 public constant MAX_SESSION = 30 days;
 
     event MatchCreated(uint256 indexed id, address indexed creator, GameType game, uint256 stake);
     event MatchJoined(uint256 indexed id, address indexed opponent);
@@ -121,7 +126,8 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     event NavalRevealed(uint256 indexed id, address indexed player, bool honest);
     event PaymentDeferred(address indexed to, uint256 amount);
     event Withdrawn(address indexed from, address indexed to, uint256 amount);
-    event SessionKeySet(uint256 indexed id, address indexed player, address key);
+    event SessionOpened(address indexed player, address indexed key, uint256 budget, uint64 expiresAt);
+    event SessionClosed(address indexed player);
 
     error InvalidState();
     error NotPlayer();
@@ -129,6 +135,8 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     error InvalidMove();
     error TooEarly();
     error StakeTooLow();
+    error SessionExpired();
+    error BudgetExceeded();
 
     constructor(IERC20 _token, uint256 _moveTimeout) Ownable(msg.sender) {
         token = _token;
@@ -139,33 +147,26 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Publier une annonce : choisit le jeu et dépose sa mise.
     function createMatch(GameType game, uint256 stake) external nonReentrant returns (uint256 id) {
-        id = _create(game, stake);
+        id = _create(msg.sender, game, stake);
     }
 
-    /// @notice Publier une annonce et autoriser une clé de session pour cette partie, en une
-    ///         seule transaction. L'ETH envoyé (facultatif) est transféré à la clé pour payer
-    ///         le gaz de ses coups.
-    function createMatchWithSession(GameType game, uint256 stake, address sessionKey)
-        external
-        payable
-        nonReentrant
-        returns (uint256 id)
-    {
-        id = _create(game, stake);
-        _setSessionKey(id, msg.sender, sessionKey);
+    /// @notice Publier une annonce depuis la clé de session : la mise est prélevée sur le wallet
+    ///         du joueur (dans la limite du budget de la session), sans confirmation.
+    function createMatchAsSession(GameType game, uint256 stake) external nonReentrant returns (uint256 id) {
+        id = _create(_spend(stake), game, stake);
     }
 
-    function _create(GameType game, uint256 stake) internal returns (uint256 id) {
+    function _create(address player, GameType game, uint256 stake) internal returns (uint256 id) {
         if (stake < MIN_STAKE) revert StakeTooLow();
         id = ++matchCount;
         Match storage m = matches[id];
         m.game = game;
         m.status = Status.Open;
-        m.creator = msg.sender;
+        m.creator = player;
         m.stake = stake;
         m.lastActionAt = uint64(block.timestamp);
-        token.safeTransferFrom(msg.sender, address(this), stake);
-        emit MatchCreated(id, msg.sender, game, stake);
+        token.safeTransferFrom(player, address(this), stake);
+        emit MatchCreated(id, player, game, stake);
     }
 
     /// @notice Annuler sa propre annonce tant que personne ne l'a acceptée (mise remboursée).
@@ -180,66 +181,77 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Accepter une annonce : dépose la même mise. L'accepteur joue en premier.
     function joinMatch(uint256 id) external nonReentrant {
-        _join(id);
+        _join(msg.sender, id);
     }
 
-    /// @notice Accepter une annonce et autoriser une clé de session, en une seule transaction.
-    function joinMatchWithSession(uint256 id, address sessionKey) external payable nonReentrant {
-        _join(id);
-        _setSessionKey(id, msg.sender, sessionKey);
+    /// @notice Accepter une annonce depuis la clé de session (mise prélevée sur le wallet du joueur).
+    function joinMatchAsSession(uint256 id) external nonReentrant {
+        _join(_spend(matches[id].stake), id);
     }
 
-    /// @notice Autoriser (ou remplacer) sa clé de session pour une partie, par exemple après un
-    ///         changement de navigateur. Seul le wallet du joueur peut le faire.
-    function setSessionKey(uint256 id, address sessionKey) external payable nonReentrant {
-        Match storage m = matches[id];
-        if (m.status != Status.Open && m.status != Status.Active) revert InvalidState();
-        if (msg.sender != m.creator && msg.sender != m.opponent) revert NotPlayer();
-        _setSessionKey(id, msg.sender, sessionKey);
-    }
-
-    function _join(uint256 id) internal {
+    function _join(address player, uint256 id) internal {
+        if (id == 0 || id > matchCount) revert InvalidState(); // annonce inexistante
         Match storage m = matches[id];
         if (m.status != Status.Open) revert InvalidState();
-        if (msg.sender == m.creator || msg.sender == sessionKeys[id].creator) revert NotPlayer();
-        m.opponent = msg.sender;
+        if (player == m.creator) revert NotPlayer();
+        m.opponent = player;
         m.status = Status.Active;
-        m.turn = msg.sender;
+        m.turn = player;
         m.lastActionAt = uint64(block.timestamp);
-        token.safeTransferFrom(msg.sender, address(this), m.stake);
-        emit MatchJoined(id, msg.sender);
+        token.safeTransferFrom(player, address(this), m.stake);
+        emit MatchJoined(id, player);
     }
 
-    // ------------------------------------------------------------------ clés de session
+    // ------------------------------------------------------------------ sessions de jeu
 
-    function _setSessionKey(uint256 id, address player, address key) internal {
-        Match storage m = matches[id];
-        SessionKeys storage k = sessionKeys[id];
-        if (key != address(0)) {
-            // La clé ne doit se confondre avec aucun autre acteur de la partie.
-            if (key == m.creator || key == m.opponent) revert InvalidMove();
-            if (key == (player == m.creator ? k.opponent : k.creator)) revert InvalidMove();
-        }
-        if (player == m.creator) k.creator = key;
-        else k.opponent = key;
-        emit SessionKeySet(id, player, key);
+    /// @notice Ouvrir (ou renouveler) sa session : autorise `key` pendant `duration` secondes
+    ///         (30 jours max) à engager au total `budget` en mises. L'ETH envoyé est transféré
+    ///         à la clé pour payer le gaz de ses transactions. Remplace la session précédente.
+    function openSession(address key, uint256 budget, uint64 duration) external payable nonReentrant {
+        if (key == address(0) || key == msg.sender || duration == 0 || duration > MAX_SESSION) revert InvalidMove();
+        address current = sessionOwner[key];
+        if (current != address(0) && current != msg.sender) revert InvalidMove(); // clé déjà prise
+        Session storage s = sessions[msg.sender];
+        if (s.key != address(0) && s.key != key) delete sessionOwner[s.key];
+        s.key = key;
+        s.expiresAt = uint64(block.timestamp) + duration;
+        s.budget = budget;
+        sessionOwner[key] = msg.sender;
+        emit SessionOpened(msg.sender, key, budget, s.expiresAt);
         if (msg.value > 0) {
-            // Petit montant d'ETH pour le gaz des coups joués par la clé.
-            if (key == address(0)) revert InvalidMove();
             (bool ok, ) = key.call{value: msg.value}("");
             if (!ok) revert InvalidMove();
         }
     }
 
-    /// @dev Joueur au nom duquel agit l'appelant : lui-même, ou le joueur qui a autorisé cette
-    ///      clé de session pour cette partie. Pour un inconnu, renvoie l'appelant (les contrôles
-    ///      habituels le rejettent ensuite).
+    /// @notice Fermer sa session : la clé ne peut plus rien faire (seul le wallet du joueur peut l'appeler).
+    function closeSession() external nonReentrant {
+        Session storage s = sessions[msg.sender];
+        if (s.key == address(0)) revert InvalidState();
+        delete sessionOwner[s.key];
+        delete sessions[msg.sender];
+        emit SessionClosed(msg.sender);
+    }
+
+    /// @dev Appelé par une clé de session qui engage une mise : renvoie le joueur et décompte le budget.
+    function _spend(uint256 stake) internal returns (address player) {
+        player = sessionOwner[msg.sender];
+        if (player == address(0)) revert NotPlayer();
+        Session storage s = sessions[player];
+        if (block.timestamp > s.expiresAt) revert SessionExpired();
+        if (stake > s.budget) revert BudgetExceeded();
+        s.budget -= stake;
+    }
+
+    /// @dev Joueur au nom duquel agit l'appelant dans la partie `id` : lui-même, ou le joueur
+    ///      dont il est la clé de session. Les coups restent permis après l'expiration (seules
+    ///      les nouvelles mises s'arrêtent), tant que la session n'est pas fermée ou remplacée.
+    ///      Pour un inconnu, renvoie l'appelant (les contrôles habituels le rejettent ensuite).
     function _player(uint256 id) internal view returns (address) {
         Match storage m = matches[id];
         if (msg.sender == m.creator || msg.sender == m.opponent) return msg.sender;
-        SessionKeys storage k = sessionKeys[id];
-        if (msg.sender == k.creator) return m.creator;
-        if (msg.sender == k.opponent) return m.opponent;
+        address p = sessionOwner[msg.sender];
+        if (p != address(0) && (p == m.creator || p == m.opponent)) return p;
         return msg.sender;
     }
 

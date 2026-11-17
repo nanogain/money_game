@@ -109,3 +109,9 @@ footer { text-align: center; padding: 20px; }
   .item .side { width: 100%; justify-content: space-between; }
   .pfc button { flex: 1; padding: 12px 8px; }
 }
+
+/* session de jeu (sans confirmation) */
+.session { border-color: #8a6d1f; }
+.session .row { margin-top: 8px; }
+.session-info { display: block; color: #e8c15a; cursor: pointer; }
+.session-info:empty { display: none; }
