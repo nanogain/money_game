@@ -5,8 +5,8 @@ window.NETWORKS = {
     "name": "Base Sepolia (réseau de test)",
     "rpc": "https://sepolia.base.org",
     "explorer": "https://sepolia.basescan.org",
-    "arena": "0x5bd54641eFD0d58E2f251600454c8c506ef4E280",
-    "usdc": "0x742680c7d095a387443564B0907C5B1b1Da56388",
+    "arena": "0x82Fec22Bc63f9112AC779F5905E46ee7e97688fB",
+    "usdc": "0x29c55083afe52e638222D2Aa694f5A2dC2c4eEa7",
     "mockUsdc": true,
     "moveTimeout": 600
   },
