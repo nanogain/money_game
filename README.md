@@ -22,22 +22,54 @@ Règles communes :
 - On peut annuler sa propre annonce tant que personne ne l'a acceptée.
 - Les frais (2 % du pot) s'accumulent dans le contrat ; seul le propriétaire peut les retirer (`withdrawFees`).
 
-## Confirmations du wallet
+## Confirmations du wallet et frais de réseau
 
-- **Connexion** : MetaMask demande d'autoriser le site (la première fois seulement), puis le site
-  enchaîne sur **une seule confirmation** : l'ouverture d'une **session de jeu**.
-- **La toute première fois** sur un compte, il y a en plus l'autorisation du jeton (le contrat ne
-  prélève jamais que les mises engagées).
+**Avec le paymaster (sans ETH)**, quand `paymasterUrl`, `entryPoint` et `accountFactory` sont
+renseignés dans `frontend/config.js` :
+- **Connexion** : MetaMask demande d'autoriser le site, puis **deux signatures gratuites** la
+  toute première fois (autorisation du jeton, puis ouverture de la session), **une seule** ensuite.
+  Une signature n'est pas une transaction : elle ne coûte rien.
 - **Ensuite, plus aucune fenêtre** : publier, relever un défi, jouer, révéler, abandonner,
   recevoir des jetons de test.
+- Le joueur n'a **besoin d'aucun ETH**, seulement du jeton de mise. Les frais de réseau sont
+  payés par la plateforme via le paymaster Coinbase (CDP), au travers d'un « compte de jeu »
+  ERC-4337 (SimpleAccount v0.7) contrôlé par la clé de session du navigateur.
 
-La session autorise une clé jetable, créée et gardée dans le navigateur, avec un **budget de
-mises** (100 par défaut) et une **durée** (1, 7 ou 30 jours, 7 par défaut). La même transaction
-envoie à la clé 0,0005 ETH pour payer ses frais. La clé ne peut envoyer de l'argent que dans des
-parties : mises prélevées sur le wallet du joueur, gains et remboursements toujours versés au
-wallet du joueur. Elle ne peut ni retirer, ni dépasser son budget, ni prolonger la session.
+**Sans paymaster** (ou si le paymaster refuse une opération), le site revient à l'ancien
+fonctionnement : une transaction pour ouvrir la session, qui envoie un peu d'ETH à la clé.
+
+La session autorise une clé jetable (ou le compte de jeu) avec un **budget de mises** (100 par
+défaut) et une **durée** (1, 7 ou 30 jours, 7 par défaut). Elle est ouverte soit par une
+transaction (`openSession`), soit par une signature EIP-712 du joueur (`openSessionBySig`,
+compatible avec les comptes MetaMask intelligents). La clé ne peut envoyer de l'argent que dans
+des parties : mises prélevées sur le wallet du joueur, gains et remboursements toujours versés
+au wallet du joueur. Elle ne peut ni retirer, ni dépasser son budget, ni prolonger la session.
 Après expiration, elle peut encore finir les parties en cours mais plus engager de mises.
 Cliquer sur « ⚡ Sans confirmation… » en haut de la page ferme la session.
+
+## Frais de la plateforme (2 %)
+
+À chaque fin de partie, les 2 % sont **versés automatiquement** à l'adresse de réception
+(`feeRecipient`). C'est le propriétaire au déploiement ; il peut la changer depuis la carte
+« Propriétaire » du site (`setFeeRecipient`). Si un versement échoue (adresse bloquée par le
+jeton), les frais restent dans le contrat et le propriétaire peut les retirer (`withdrawFees`).
+
+## Paymaster Coinbase (CDP)
+
+1. Créer un compte sur https://portal.cdp.coinbase.com et ouvrir
+   https://portal.cdp.coinbase.com/products/bundler-and-paymaster, réseau **Base Sepolia**.
+2. Copier l'adresse « Paymaster & Bundler endpoint » (elle contient la *Client API Key*).
+3. Dans la configuration du paymaster : activer le paymaster, autoriser les contrats
+   (contrat des mini-jeux, jeton, fabrique de comptes) et fixer des limites de dépense
+   (par opération, par adresse, globale).
+4. Mettre cette adresse dans `paymasterUrl` de l'entrée `84532` de `frontend/config.js`.
+
+Cette adresse est visible par tous sur un site public. Sur le réseau de test, avec la liste
+de contrats autorisés et les limites, c'est acceptable. **Avant la production**, il faut la
+cacher derrière un petit serveur relais (proxy). Ne jamais publier la *Secret API Key*.
+
+En local, `npm run bundler` lance un faux bundler/paymaster sur `http://127.0.0.1:8547`
+(utilisé automatiquement par `scripts/deploy.js --network localhost`).
 
 ## Contenu
 
@@ -48,6 +80,9 @@ Cliquer sur « ⚡ Sans confirmation… » en haut de la page ferme la session.
 - `scripts/export-frontend.js` : copie les ABI/bytecodes compilés dans `frontend/contracts.js`.
 - `frontend/deploy.html` : déploiement des contrats depuis MetaMask.
 - `frontend/` : site web statique (MetaMask, annonces, plateaux de jeu).
+- `frontend/aa.js` : envoi des opérations sans ETH (ERC-4337, paymaster).
+- `contracts/aa/ComptesDeJeu.sol` : fabrique des comptes de jeu (SimpleAccountFactory v0.7).
+- `scripts/mock-bundler.js` : faux bundler/paymaster pour les essais en local.
 
 ## Lancer en local
 
@@ -56,11 +91,10 @@ npm install
 npx hardhat test                                          # les tests
 npx hardhat node                                          # blockchain locale (terminal 1)
 npx hardhat run scripts/deploy.js --network localhost     # terminal 2
+npm run bundler                                           # terminal 3 : faux paymaster
 cd frontend && python3 -m http.server 8080                # puis ouvrir http://localhost:8080
 ```
 Sur `localhost`, le site utilise la blockchain locale ; ailleurs, Base Sepolia (forcer avec `?chain=31337` ou `?chain=84532`).
-```
-```
 Dans MetaMask : ajouter le réseau `http://127.0.0.1:8545` (chainId 31337) et importer une des
 clés de test affichées par `npx hardhat node`.
 
@@ -74,8 +108,8 @@ Le site est publié automatiquement sur GitHub Pages à chaque mise à jour de `
 
 Pour installer les contrats, sans partager aucune clé :
 1. Ouvrir https://nanogain.github.io/money_game/deploy.html avec MetaMask (un peu d'ETH de test sur le compte).
-2. Cliquer « Connecter MetaMask et déployer » et confirmer les 2 transactions.
-   Le compte qui déploie devient propriétaire du contrat (retrait des 2 % de frais).
+2. Cliquer « Connecter MetaMask et déployer » et confirmer les 3 transactions.
+   Le compte qui déploie devient propriétaire du contrat et reçoit les 2 % de frais.
 3. Reporter les adresses affichées dans `frontend/config.js` (entrée `84532`) pour que tous les joueurs
    utilisent les mêmes contrats. En attendant, le navigateur qui a déployé les garde en mémoire.
 

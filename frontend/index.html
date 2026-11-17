@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0f1220" />
   <title>Arène — mini-jeux avec mises</title>
-  <link rel="stylesheet" href="style.css?v=20261117c" />
-  <link rel="stylesheet" href="games-extra.css?v=20261117c" />
+  <link rel="stylesheet" href="style.css?v=20261117e" />
+  <link rel="stylesheet" href="games-extra.css?v=20261117e" />
 </head>
 <body>
   <header>
@@ -58,7 +58,7 @@
             <option value="30">30 jours</option>
           </select>
         </label>
-        <button id="sessionBtn">Activer (1 confirmation)</button>
+        <button id="sessionBtn">Activer</button>
       </div>
       <p class="muted small">Une clé jetable, gardée dans ce navigateur, joue pour vous. Elle ne peut engager des mises que dans la limite de ce budget et de cette durée ; vos gains reviennent toujours sur votre wallet, et elle ne peut rien retirer.</p>
     </section>
@@ -130,22 +130,30 @@
       <h2>Gains de la plateforme</h2>
       <p class="muted small">Visible seulement par le propriétaire du contrat.</p>
       <div class="stats">
-        <div class="stat"><span class="stat-val" id="ownFees">0</span><span class="stat-lbl">USDC à retirer</span></div>
+        <div class="stat"><span class="stat-val" id="ownFees">0</span><span class="stat-lbl">USDC en attente (virement échoué)</span></div>
         <div class="stat"><span class="stat-val" id="ownTotal">0</span><span class="stat-lbl">USDC de frais au total</span></div>
         <div class="stat"><span class="stat-val" id="ownGames">0</span><span class="stat-lbl">parties terminées</span></div>
         <div class="stat"><span class="stat-val" id="ownVolume">0</span><span class="stat-lbl">USDC misés au total</span></div>
       </div>
-      <div class="row"><button id="withdrawBtn">Retirer les frais vers mon wallet</button></div>
+      <p class="small">Les 2 % sont envoyés <strong>automatiquement</strong> à chaque fin de partie vers : <span id="ownRecipient">…</span></p>
+      <div class="row">
+        <label>Nouvelle adresse de réception
+          <input id="recipientInput" placeholder="0x…" />
+        </label>
+        <button id="recipientBtn" class="ghost">Changer l'adresse</button>
+        <button id="withdrawBtn" class="ghost">Retirer les frais en attente</button>
+      </div>
     </section>
   </main>
 
   <footer class="muted small" id="footer"></footer>
 
   <script src="ethers.umd.min.js"></script>
-  <script src="contracts.js?v=20261117c"></script>
-  <script src="config.js?v=20261117c"></script>
-  <script src="network.js?v=20261117c"></script>
-  <script src="games-extra.js?v=20261117c"></script>
-  <script src="app.js?v=20261117c"></script>
+  <script src="contracts.js?v=20261117e"></script>
+  <script src="config.js?v=20261117e"></script>
+  <script src="network.js?v=20261117e"></script>
+  <script src="games-extra.js?v=20261117e"></script>
+  <script src="aa.js?v=20261117e"></script>
+  <script src="app.js?v=20261117e"></script>
 </body>
 </html>

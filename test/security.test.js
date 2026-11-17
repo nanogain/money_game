@@ -96,7 +96,7 @@ describe("Revue de sécurité", function () {
       await expect(arena.connect(alice).createMatch(MORPION, 9_999)).to.be.revertedWithCustomError(arena, "StakeTooLow");
       const id = await newMatch(MORPION, 10_000n);
       await arena.connect(alice).resign(id);
-      expect(await arena.feesAccrued()).to.equal(400n);
+      expect(await usdc.balanceOf(owner.address)).to.equal(400n); // versés automatiquement
     });
   });
 

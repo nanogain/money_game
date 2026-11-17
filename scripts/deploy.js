@@ -26,6 +26,24 @@ async function main() {
   const arenaAddress = await arena.getAddress();
   console.log(`MiniJeuxArena : ${arenaAddress} (délai par coup : ${timeout} s)`);
 
+  // Comptes de jeu ERC-4337 : fabrique de comptes (sur tous les réseaux) ; en local seulement,
+  // EntryPoint v0.7 et un paymaster qui paie tout (le faux bundler scripts/mock-bundler.js s'en sert).
+  let entryPoint = process.env.ENTRYPOINT || "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+  let localPaymaster = "";
+  if (network.name === "localhost" || network.name === "hardhat") {
+    const ep = await (await ethers.getContractFactory("EntryPoint")).deploy();
+    await ep.waitForDeployment();
+    entryPoint = await ep.getAddress();
+    const pm = await (await ethers.getContractFactory("OpenPaymaster")).deploy(entryPoint);
+    await pm.waitForDeployment();
+    await (await pm.deposit({ value: ethers.parseEther("10") })).wait();
+    localPaymaster = await pm.getAddress();
+  }
+  const factory = await (await ethers.getContractFactory("SimpleAccountFactory")).deploy(entryPoint);
+  await factory.waitForDeployment();
+  const accountFactory = await factory.getAddress();
+  console.log(`Fabrique de comptes de jeu : ${accountFactory} (EntryPoint ${entryPoint})`);
+
   await exportFrontend();
   const { chainId } = await ethers.provider.getNetwork();
   const file = path.join(__dirname, "..", "frontend", "config.js");
@@ -33,7 +51,8 @@ async function main() {
   const json = src.slice(src.indexOf("{"), src.lastIndexOf("}") + 1);
   const nets = JSON.parse(json);
   const key = String(chainId);
-  nets[key] = { ...(nets[key] || { name: network.name, rpc: "", explorer: "" }), arena: arenaAddress, usdc: usdcAddress, mockUsdc: mock, moveTimeout: timeout };
+  nets[key] = { ...(nets[key] || { name: network.name, rpc: "", explorer: "" }), arena: arenaAddress, usdc: usdcAddress, mockUsdc: mock, moveTimeout: timeout, entryPoint, accountFactory };
+  if (localPaymaster) Object.assign(nets[key], { paymasterUrl: "http://127.0.0.1:8547", localPaymaster });
   fs.writeFileSync(file, src.slice(0, src.indexOf("{")) + JSON.stringify(nets, null, 2) + ";\n");
   console.log("frontend/config.js mis à jour.");
 }

@@ -122,7 +122,7 @@ async function connect({ pick = false } = {}) {
   await useAccount(accounts[0]);
   // Connexion demandée par le joueur : on enchaîne tout de suite sur l'activation de la session
   // (la seule confirmation), sauf si une session valide existe déjà pour ce navigateur.
-  if (pick && state.account && (await sessionSupported()) && !sessionReady(1n) && state.eth > 0n) {
+  if (pick && state.account && (await sessionSupported()) && !sessionReady(1n) && (aaEnabled() || state.eth > 0n)) {
     await activateSession().catch(() => {});
   }
 }
@@ -271,12 +271,18 @@ async function loadSession() {
     readVia((p) => p.getBalance(w.address)).catch(() => null),
     readVia((p) => p.send ? p.send("eth_gasPrice", []).then(BigInt) : p.getFeeData().then((f) => f.gasPrice)).catch(() => null),
   ]);
+  // Compte de jeu (frais payés par la plateforme) si un paymaster est configuré.
+  const acct = aaEnabled() ? await gameAccountAddress(state.provider || state.rpc, w.address).catch(() => null) : null;
   if (!same(account, state.account)) return;
-  const on = same(s.key, w.address);
+  const mode = acct && same(s.key, acct) ? "aa" : same(s.key, w.address) ? "eoa" : null;
+  const on = !!mode;
   const expiresAt = Number(s.expiresAt);
-  // De quoi payer la transaction la plus chère (révélation de la Bataille navale), avec marge.
-  const gasOk = bal === null ? (prev?.gasOk ?? true) : gasPrice === null ? bal > 0n : bal >= gasPrice * 2n * 400000n;
+  // Mode « eoa » : la clé paie ses frais, il lui faut de quoi payer la transaction la plus chère.
+  const gasOk = mode === "aa" ? true
+    : bal === null ? (prev?.gasOk ?? true) : gasPrice === null ? bal > 0n : bal >= gasPrice * 2n * 400000n;
   state.session = {
+    mode,
+    acct,
     on,
     expiresAt,
     budget: on ? s.budget : 0n,
@@ -320,6 +326,15 @@ async function activateSession() {
   let budget;
   try { budget = ethers.parseUnits(budgetTxt, DECIMALS); } catch { return notify("Budget invalide.", true); }
   localStorage.setItem(SESSION_PREFS, JSON.stringify({ budget: budgetTxt, days }));
+  if (aaEnabled()) {
+    try {
+      return await activateSessionGasless(budget, days);
+    } catch (e) {
+      if (e?.code === "ACTION_REJECTED" || e?.code === 4001) return notify("Signature refusée dans le wallet.", true);
+      console.warn(e);
+      notify(`Activation gratuite impossible (${errMsg(e)}). On passe par une transaction classique.`, true);
+    }
+  }
   const allowance = await state.usdc.allowance(state.account, APP_CONFIG.arena);
   if (allowance < budget) {
     notify("Première fois : MetaMask demande d'autoriser le contrat à prendre vos mises. Ensuite, une seule confirmation à la connexion.");
@@ -339,6 +354,53 @@ async function activateSession() {
   await tx("Activation du jeu sans confirmation", () => state.arena.openSession(w.address, budget, days * 86400, { value }));
 }
 
+// Activation sans ETH : le joueur SIGNE (gratuit) l'ouverture de session, et la première fois
+// l'autorisation du jeton (permit). Le compte de jeu envoie le tout ; la plateforme paie les frais.
+async function activateSessionGasless(budget, days) {
+  const w = sessionWallet();
+  const provider = state.provider || state.rpc;
+  const acct = await gameAccountAddress(provider, w.address);
+  const deadline = nowSec() + 3600;
+  const calls = [];
+  const allowance = await state.usdc.allowance(state.account, APP_CONFIG.arena);
+  if (allowance < budget) {
+    notify("Première fois : signez l'autorisation de prendre vos mises (gratuit, aucune transaction).");
+    const [name, nonce, version] = await Promise.all([
+      state.usdc.name(),
+      state.usdc.nonces(state.account),
+      APP_CONFIG.tokenPermitVersion || state.usdc.eip712Domain().then((d) => d.version).catch(() => "1"),
+    ]);
+    const sig = ethers.Signature.from(await state.signer.signTypedData(
+      { name, version, chainId: APP_CONFIG.chainId, verifyingContract: APP_CONFIG.usdc },
+      { Permit: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
+      { owner: state.account, spender: APP_CONFIG.arena, value: ethers.MaxUint256, nonce, deadline }));
+    calls.push({ to: APP_CONFIG.usdc, data: state.usdc.interface.encodeFunctionData("permit", [state.account, APP_CONFIG.arena, ethers.MaxUint256, deadline, sig.v, sig.r, sig.s]) });
+  }
+  notify("Signez l'ouverture de la session de jeu (gratuit, aucune transaction).");
+  const duration = days * 86400;
+  const sessionNonce = await state.readArena.sessionNonces(state.account);
+  const sig = await state.signer.signTypedData(
+    { name: "Arene", version: "1", chainId: APP_CONFIG.chainId, verifyingContract: APP_CONFIG.arena },
+    { Session: [
+      { name: "player", type: "address" }, { name: "key", type: "address" }, { name: "budget", type: "uint256" },
+      { name: "duration", type: "uint64" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" },
+    ] },
+    { player: state.account, key: acct, budget, duration, nonce: sessionNonce, deadline });
+  calls.push({ to: APP_CONFIG.arena, data: state.arena.interface.encodeFunctionData("openSessionBySig", [state.account, acct, budget, duration, deadline, sig]) });
+  let failed = null;
+  await tx("Activation du jeu sans confirmation", () => sendUserOp(provider, w, calls), { session: true }).catch((e) => { failed = e; });
+  if (failed) throw failed;
+}
+
+// Envoie un appel avec la clé de session : compte de jeu (frais payés par la plateforme) ou clé seule.
+function sessionCall(contract, method, ...args) {
+  const w = sessionWallet();
+  if (state.session?.mode === "aa") {
+    return sendUserOp(state.provider || state.rpc, w, [{ to: contract.target, data: contract.interface.encodeFunctionData(method, args) }]);
+  }
+  return contract.connect(w)[method](...args);
+}
+
 async function closeSession() {
   await tx("Fin de la session", () => state.arena.closeSession());
 }
@@ -349,8 +411,13 @@ async function gameTx(id, label, method, ...args) {
     const why = sessionWhyNot();
     return tx(label + (why ? ` (${why})` : ""), () => state.arena[method](...args));
   }
-  const w = sessionWallet();
-  return tx(label, () => state.arena.connect(w)[method](...args), { session: true });
+  try {
+    return await tx(label, () => sessionCall(state.arena, method, ...args), { session: true });
+  } catch (e) {
+    // Paymaster indisponible (quota, panne) : on retente par le wallet plutôt que de bloquer la partie.
+    if (!String(e?.message).includes("Paymaster")) throw e;
+    return tx(`${label} (frais non pris en charge, confirmation nécessaire)`, () => state.arena[method](...args));
+  }
 }
 
 function renderSession() {
@@ -373,7 +440,9 @@ function renderSession() {
     info.textContent = "";
   }
   if (!show) return;
-  let why = "Une seule confirmation dans MetaMask, puis vous publiez, relevez des défis et jouez sans aucune autre fenêtre.";
+  let why = aaEnabled()
+    ? "Une seule signature dans MetaMask, gratuite (aucun ETH nécessaire : la plateforme paie les frais), puis vous publiez, relevez des défis et jouez sans aucune autre fenêtre."
+    : "Une seule confirmation dans MetaMask, puis vous publiez, relevez des défis et jouez sans aucune autre fenêtre.";
   if (s.on && !s.canStake) why = "Votre session est terminée. Renouvelez-la (une confirmation) pour continuer à jouer sans MetaMask.";
   else if (s.on && s.budget < 10_000n) why = "Le budget de votre session est épuisé. Renouvelez-la (une confirmation).";
   else if (s.on && !s.gasOk) why = "Votre session n'a plus d'ETH pour payer les frais. Renouvelez-la (une confirmation).";
@@ -395,7 +464,7 @@ async function createMatch() {
   if (state.usdcBal !== null && stake > state.usdcBal) return notify(`Solde insuffisant : vous avez ${fmt(state.usdcBal)} USDC.`, true);
   const before = Number(await state.readArena.matchCount());
   if (sessionReady(stake)) {
-    await tx("Publication de l'annonce", () => state.arena.connect(sessionWallet()).createMatchAsSession(game, stake), { session: true });
+    await tx("Publication de l'annonce", () => sessionCall(state.arena, "createMatchAsSession", game, stake), { session: true });
   } else {
     const why = sessionWhyNot(stake);
     await ensureAllowance(stake);
@@ -410,7 +479,7 @@ async function joinMatch(id, stake) {
   if (!state.account) return connect({ pick: true }).catch((e) => notify(errMsg(e), true));
   if (state.usdcBal !== null && BigInt(stake) > state.usdcBal) return notify(`Solde insuffisant : il faut ${fmt(stake)} USDC, vous en avez ${fmt(state.usdcBal)}.`, true);
   if (sessionReady(stake)) {
-    await tx("Acceptation du défi", () => state.arena.connect(sessionWallet()).joinMatchAsSession(id), { session: true });
+    await tx("Acceptation du défi", () => sessionCall(state.arena, "joinMatchAsSession", id), { session: true });
   } else {
     const why = sessionWhyNot(stake);
     await ensureAllowance(stake);
@@ -495,6 +564,7 @@ async function refresh() {
         state.owner ? state.owner : state.readArena.owner().catch(() => ZERO),
         state.readArena.feesAccrued().catch(() => 0n),
       ]);
+      state.feeRecipient = await state.readArena.feeRecipient().catch(() => null);
       const allowance = await state.usdc.allowance(account, APP_CONFIG.arena).catch(() => 0n);
       await loadSession().catch((e) => console.warn(e));
       if (!stillSame()) return; // compte changé pendant le chargement
@@ -749,6 +819,9 @@ function renderOwner() {
   $("ownGames").textContent = finished.length;
   $("ownVolume").textContent = fmt(volume);
   $("withdrawBtn").disabled = state.fees === 0n;
+  $("withdrawBtn").classList.toggle("hidden", state.fees === 0n);
+  if (state.feeRecipient) $("ownRecipient").innerHTML = addrLink(state.feeRecipient) + (same(state.feeRecipient, state.account) ? " (ce wallet)" : "");
+  else $("ownRecipient").textContent = "virement manuel (ancien contrat)";
 }
 
 function renderFooter() {
@@ -946,7 +1019,7 @@ $("faucetBtn").onclick = () => {
   // Avec une session active, la clé distribue les jetons de test au joueur sans fenêtre MetaMask.
   const viaSession = sessionReady() && state.usdc.interface.getFunction("faucetTo");
   const send = viaSession
-    ? tx("Jetons de test", () => state.usdc.connect(sessionWallet()).faucetTo(state.account, amount), { session: true })
+    ? tx("Jetons de test", () => sessionCall(state.usdc, "faucetTo", state.account, amount), { session: true })
     : tx("Jetons de test", () => state.usdc.faucet(amount));
   send.catch(() => {});
 };
@@ -956,6 +1029,11 @@ $("sessionInfo").onclick = () => {
   if (confirm("Arrêter le jeu sans confirmation sur ce compte ? (une confirmation MetaMask)")) closeSession().catch(() => {});
 };
 $("withdrawBtn").onclick = () => withdrawFees().catch(() => {});
+$("recipientBtn").onclick = () => {
+  const a = $("recipientInput").value.trim();
+  if (!ethers.isAddress(a)) return notify("Adresse invalide (format 0x…).", true);
+  tx("Adresse de réception des frais", () => state.arena.setFeeRecipient(a)).catch(() => {});
+};
 $("historyMore").onclick = () => { state.historyShown += HISTORY_PAGE; renderLists(); };
 $("guideClose").onclick = () => { localStorage.setItem("arene-guide-masque", "1"); renderGuide(); };
 $("gameSelect").onchange = renderCreate;

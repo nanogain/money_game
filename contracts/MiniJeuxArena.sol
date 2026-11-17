@@ -6,12 +6,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 /// @title MiniJeuxArena
 /// @notice Mini-jeux à deux joueurs avec mise en USDC. Toute la logique des jeux est
 ///         dans le contrat : aucun oracle ni serveur ne décide du vainqueur.
 ///         Jeux : Pierre-Feuille-Ciseaux (coups cachés puis révélés), Morpion, Puissance 4.
-contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
+contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
     using SafeERC20 for IERC20;
 
     enum GameType { PierreFeuilleCiseaux, Morpion, Puissance4, DuelDeDes, BatailleNavale }
@@ -83,7 +85,10 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     uint256 public immutable moveTimeout; // délai max pour jouer, en secondes
 
     uint256 public matchCount;
+    /// @notice Frais non encore versés (seulement si le virement automatique a échoué).
     uint256 public feesAccrued;
+    /// @notice Adresse qui reçoit automatiquement les 2 % à chaque fin de partie (par défaut le propriétaire).
+    address public feeRecipient;
     mapping(uint256 => Match) public matches;
     mapping(uint256 => PfcState) public pfc;
     mapping(uint256 => DiceState) public dice;
@@ -107,6 +112,10 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     mapping(address => Session) public sessions;   // joueur => session
     mapping(address => address) public sessionOwner; // clé => joueur
     uint64 public constant MAX_SESSION = 30 days;
+    /// @notice Session autorisée par une signature du joueur (gratuite, sans transaction de sa part).
+    bytes32 public constant SESSION_TYPEHASH =
+        keccak256("Session(address player,address key,uint256 budget,uint64 duration,uint256 nonce,uint256 deadline)");
+    mapping(address => uint256) public sessionNonces;
 
     event MatchCreated(uint256 indexed id, address indexed creator, GameType game, uint256 stake);
     event MatchJoined(uint256 indexed id, address indexed opponent);
@@ -128,6 +137,8 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     event Withdrawn(address indexed from, address indexed to, uint256 amount);
     event SessionOpened(address indexed player, address indexed key, uint256 budget, uint64 expiresAt);
     event SessionClosed(address indexed player);
+    event FeeRecipientChanged(address recipient);
+    event FeePaid(uint256 indexed id, address indexed to, uint256 amount);
 
     error InvalidState();
     error NotPlayer();
@@ -138,9 +149,10 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     error SessionExpired();
     error BudgetExceeded();
 
-    constructor(IERC20 _token, uint256 _moveTimeout) Ownable(msg.sender) {
+    constructor(IERC20 _token, uint256 _moveTimeout) Ownable(msg.sender) EIP712("Arene", "1") {
         token = _token;
         moveTimeout = _moveTimeout;
+        feeRecipient = msg.sender;
     }
 
     // ------------------------------------------------------------------ annonces
@@ -208,20 +220,44 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     ///         (30 jours max) à engager au total `budget` en mises. L'ETH envoyé est transféré
     ///         à la clé pour payer le gaz de ses transactions. Remplace la session précédente.
     function openSession(address key, uint256 budget, uint64 duration) external payable nonReentrant {
-        if (key == address(0) || key == msg.sender || duration == 0 || duration > MAX_SESSION) revert InvalidMove();
-        address current = sessionOwner[key];
-        if (current != address(0) && current != msg.sender) revert InvalidMove(); // clé déjà prise
-        Session storage s = sessions[msg.sender];
-        if (s.key != address(0) && s.key != key) delete sessionOwner[s.key];
-        s.key = key;
-        s.expiresAt = uint64(block.timestamp) + duration;
-        s.budget = budget;
-        sessionOwner[key] = msg.sender;
-        emit SessionOpened(msg.sender, key, budget, s.expiresAt);
+        _openSession(msg.sender, key, budget, duration);
         if (msg.value > 0) {
             (bool ok, ) = key.call{value: msg.value}("");
             if (!ok) revert InvalidMove();
         }
+    }
+
+    /// @notice Ouvrir une session à partir d'une signature EIP-712 du joueur. N'importe qui peut
+    ///         l'envoyer (en pratique la clé elle-même, dont les frais sont payés par le paymaster
+    ///         de la plateforme) : le joueur n'a besoin d'aucun ETH. Chaque signature ne sert qu'une
+    ///         fois (nonce) et expire à `deadline`.
+    function openSessionBySig(
+        address player,
+        address key,
+        uint256 budget,
+        uint64 duration,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        if (block.timestamp > deadline) revert SessionExpired();
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(SESSION_TYPEHASH, player, key, budget, duration, sessionNonces[player]++, deadline))
+        );
+        if (!SignatureChecker.isValidSignatureNow(player, digest, signature)) revert NotPlayer();
+        _openSession(player, key, budget, duration);
+    }
+
+    function _openSession(address player, address key, uint256 budget, uint64 duration) internal {
+        if (key == address(0) || key == player || duration == 0 || duration > MAX_SESSION) revert InvalidMove();
+        address current = sessionOwner[key];
+        if (current != address(0) && current != player) revert InvalidMove(); // clé déjà prise
+        Session storage s = sessions[player];
+        if (s.key != address(0) && s.key != key) delete sessionOwner[s.key];
+        s.key = key;
+        s.expiresAt = uint64(block.timestamp) + duration;
+        s.budget = budget;
+        sessionOwner[key] = player;
+        emit SessionOpened(player, key, budget, s.expiresAt);
     }
 
     /// @notice Fermer sa session : la clé ne peut plus rien faire (seul le wallet du joueur peut l'appeler).
@@ -672,6 +708,14 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         revert InvalidState();
     }
 
+    /// @notice Choisir l'adresse qui reçoit automatiquement les frais.
+    function setFeeRecipient(address recipient) external onlyOwner {
+        if (recipient == address(0)) revert InvalidMove();
+        feeRecipient = recipient;
+        emit FeeRecipientChanged(recipient);
+    }
+
+    /// @notice Retirer les frais restés dans le contrat (si un virement automatique a échoué).
     function withdrawFees(address to) external onlyOwner nonReentrant {
         uint256 amount = feesAccrued;
         feesAccrued = 0;
@@ -711,7 +755,10 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         }
         uint256 pot = m.stake * 2;
         uint256 fee = (pot * FEE_BPS) / BPS;
-        feesAccrued += fee;
+        // Les 2 % partent tout de suite vers l'adresse de réception ; si ce virement échoue,
+        // ils restent dans le contrat (withdrawFees) sans bloquer la partie.
+        if (token.trySafeTransfer(feeRecipient, fee)) emit FeePaid(id, feeRecipient, fee);
+        else feesAccrued += fee;
         _pay(winner, pot - fee);
         emit MatchFinished(id, winner, pot - fee, fee);
     }
