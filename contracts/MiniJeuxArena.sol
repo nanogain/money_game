@@ -5,12 +5,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @title MiniJeuxArena
 /// @notice Mini-jeux à deux joueurs avec mise en USDC. Toute la logique des jeux est
 ///         dans le contrat : aucun oracle ni serveur ne décide du vainqueur.
 ///         Jeux : Pierre-Feuille-Ciseaux (coups cachés puis révélés), Morpion, Puissance 4.
-contract MiniJeuxArena is ReentrancyGuard, Ownable {
+contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     enum GameType { PierreFeuilleCiseaux, Morpion, Puissance4, DuelDeDes, BatailleNavale }
@@ -71,6 +72,12 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
 
     uint256 public constant FEE_BPS = 200; // 2 %
     uint256 public constant BPS = 10_000;
+    /// @dev Mise minimale par joueur (0,01 USDC à 6 décimales). En dessous, les 2 % de frais
+    ///      seraient arrondis à zéro.
+    uint256 public constant MIN_STAKE = 10_000;
+    /// @dev Au-delà de ce nombre de manches nulles au Pierre-Feuille-Ciseaux, match nul et
+    ///      remboursement (le compteur de manches tient sur 8 bits).
+    uint8 public constant MAX_PFC_ROUNDS = 100;
 
     IERC20 public immutable token;
     uint256 public immutable moveTimeout; // délai max pour jouer, en secondes
@@ -81,6 +88,9 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
     mapping(uint256 => PfcState) public pfc;
     mapping(uint256 => DiceState) public dice;
     mapping(uint256 => NavalState) public naval;
+    /// @notice Gains qui n'ont pas pu être virés automatiquement (ex. adresse bloquée par
+    ///         l'émetteur du jeton). Récupérables avec withdraw().
+    mapping(address => uint256) public owed;
 
     event MatchCreated(uint256 indexed id, address indexed creator, GameType game, uint256 stake);
     event MatchJoined(uint256 indexed id, address indexed opponent);
@@ -98,12 +108,15 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
     event NavalShot(uint256 indexed id, address indexed shooter, uint8 cell);
     event NavalAnswered(uint256 indexed id, address indexed defender, uint8 cell, bool hit);
     event NavalRevealed(uint256 indexed id, address indexed player, bool honest);
+    event PaymentDeferred(address indexed to, uint256 amount);
+    event Withdrawn(address indexed from, address indexed to, uint256 amount);
 
     error InvalidState();
     error NotPlayer();
     error NotYourTurn();
     error InvalidMove();
     error TooEarly();
+    error StakeTooLow();
 
     constructor(IERC20 _token, uint256 _moveTimeout) Ownable(msg.sender) {
         token = _token;
@@ -114,7 +127,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
 
     /// @notice Publier une annonce : choisit le jeu et dépose sa mise.
     function createMatch(GameType game, uint256 stake) external nonReentrant returns (uint256 id) {
-        if (stake == 0) revert InvalidState();
+        if (stake < MIN_STAKE) revert StakeTooLow();
         id = ++matchCount;
         Match storage m = matches[id];
         m.game = game;
@@ -193,14 +206,18 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
     // ------------------------------------------------------------------ pierre-feuille-ciseaux
 
     /// @notice Empreinte à envoyer à commitPfc. À calculer côté navigateur, le sel reste secret.
-    function pfcHash(uint256 id, uint8 round, address player, uint8 move, bytes32 salt) public pure returns (bytes32) {
-        return keccak256(abi.encode(id, round, player, move, salt));
+    ///         Elle inclut l'adresse du contrat et le réseau pour ne pas être réutilisable ailleurs.
+    function pfcHash(uint256 id, uint8 round, address player, uint8 move, bytes32 salt) public view returns (bytes32) {
+        return keccak256(abi.encode(address(this), block.chainid, id, round, player, move, salt));
     }
 
     /// @notice Étape 1 : chaque joueur envoie son coup caché (empreinte).
     function commitPfc(uint256 id, bytes32 commitment) external nonReentrant {
         Match storage m = matches[id];
         if (m.status != Status.Active || m.game != GameType.PierreFeuilleCiseaux) revert InvalidState();
+        // Une empreinte nulle ne compterait pas comme un coup mais repousserait le délai :
+        // un joueur pourrait bloquer la partie indéfiniment.
+        if (commitment == bytes32(0)) revert InvalidMove();
         PfcState storage s = pfc[id];
         if (msg.sender == m.creator) {
             if (s.commitCreator != 0) revert InvalidState();
@@ -239,6 +256,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
                 emit PfcRoundDraw(id, m.moves);
                 delete pfc[id];
                 m.moves += 1;
+                if (m.moves >= MAX_PFC_ROUNDS) _finish(id, address(0));
             } else if ((a == 1 && b == 3) || (a == 2 && b == 1) || (a == 3 && b == 2)) {
                 _finish(id, m.creator);
             } else {
@@ -538,6 +556,20 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
 
     // ------------------------------------------------------------------ frais
 
+    /// @notice Récupérer des gains qui n'ont pas pu être virés automatiquement, vers l'adresse de son choix.
+    function withdraw(address to) external nonReentrant {
+        uint256 amount = owed[msg.sender];
+        if (amount == 0) revert InvalidState();
+        owed[msg.sender] = 0;
+        token.safeTransfer(to, amount);
+        emit Withdrawn(msg.sender, to, amount);
+    }
+
+    /// @dev Le propriétaire ne peut pas renoncer : les frais resteraient bloqués pour toujours.
+    function renounceOwnership() public pure override {
+        revert InvalidState();
+    }
+
     function withdrawFees(address to) external onlyOwner nonReentrant {
         uint256 amount = feesAccrued;
         feesAccrued = 0;
@@ -570,16 +602,25 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable {
         m.turn = address(0);
         if (winner == address(0)) {
             // match nul : chacun récupère sa mise, pas de frais
-            token.safeTransfer(m.creator, m.stake);
-            token.safeTransfer(m.opponent, m.stake);
+            _pay(m.creator, m.stake);
+            _pay(m.opponent, m.stake);
             emit MatchFinished(id, address(0), 0, 0);
             return;
         }
         uint256 pot = m.stake * 2;
         uint256 fee = (pot * FEE_BPS) / BPS;
         feesAccrued += fee;
-        token.safeTransfer(winner, pot - fee);
+        _pay(winner, pot - fee);
         emit MatchFinished(id, winner, pot - fee, fee);
+    }
+
+    /// @dev Vire un gain ; si le virement échoue (adresse bloquée par l'émetteur du jeton...),
+    ///      le montant est mis de côté au lieu de bloquer la partie et la mise de l'autre joueur.
+    function _pay(address to, uint256 amount) internal {
+        if (!token.trySafeTransfer(to, amount)) {
+            owed[to] += amount;
+            emit PaymentDeferred(to, amount);
+        }
     }
 
     function _cell(uint256 board, uint256 i) internal pure returns (uint256) {

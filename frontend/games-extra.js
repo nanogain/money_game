@@ -59,7 +59,7 @@ async function renderDice(m, { st, me, late, mm, board, actions }) {
       await tx("Lancer des dés", () => state.arena.commitDice(m.id, diceHashLocal(m.id, round, state.account, secret)));
     }));
   } else if (theirCommit === empty) {
-    status = roundTxt + `Dés lancés. En attente de l'adversaire (délai : ${mm}).`;
+    status = roundTxt + `Dés lancés. En attente de l'adversaire (${mm}).`;
   } else if (!myRev) {
     status = roundTxt + "Les deux joueurs ont lancé. Révélez pour découvrir les dés.";
     actions.appendChild(button("Révéler les dés", async () => {
@@ -68,7 +68,7 @@ async function renderDice(m, { st, me, late, mm, board, actions }) {
       await tx("Révélation", () => state.arena.revealDice(m.id, secret));
     }));
   } else {
-    status = roundTxt + `Révélé. En attente de la révélation adverse (délai : ${mm}).`;
+    status = roundTxt + `Révélé. En attente de la révélation adverse (${mm}).`;
   }
   const iActed = myCommit !== empty && (theirCommit === empty || myRev);
   const theyActed = theirCommit !== empty && (myCommit === empty || theirRev);
@@ -194,12 +194,12 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
   if (st !== 1) return null;
   if (phase === 0) {
     if (late && n[`commit${theirs}`] === empty) lateButton(actions, m.id);
-    return `Flotte validée. En attente du placement adverse (délai : ${mm}).`;
+    return `Flotte validée. En attente du placement adverse (${mm}).`;
   }
   if (phase === 1) {
     if (!myTurn) {
       if (late) lateButton(actions, m.id);
-      return `Tour de l'adversaire (délai : ${mm}).`;
+      return `Tour de l'adversaire (${mm}).`;
     }
     if (pendingAtMe && !saved) return "Plateau introuvable dans ce navigateur : il faut jouer depuis le navigateur qui a placé la flotte.";
     const report = pendingAtMe ? `L'adversaire a tiré en ${cellName(pending)} : ${answer ? "touché" : "raté"} (annoncé automatiquement). ` : "";
@@ -207,7 +207,7 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
       actions.appendChild(button("Continuer vers la révélation", () => tx("Fin des tirs", () => state.arena.navalTurn(m.id, answer, 0))));
       return report + (lastHitToLose ? "Votre dernier bateau est coulé." : "Vous avez visé toutes les cases.") + " Place à la vérification des plateaux.";
     }
-    return report + `À vous de tirer : cliquez une case du plateau adverse (temps restant : ${mm}).`;
+    return report + `À vous de tirer : cliquez une case du plateau adverse (${mm}).`;
   }
   // phase 2 : révélation
   const myRev = Number(n[`reveal${mine}`]), theirRev = Number(n[`reveal${theirs}`]);
@@ -220,7 +220,7 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
     return "Fin des tirs. Révélez votre plateau : le contrat vérifie que chacun a annoncé ses touchés honnêtement.";
   }
   if (late && myRev === 1 && theirRev === 0) lateButton(actions, m.id);
-  return `Plateau révélé. En attente de la révélation adverse (délai : ${mm}).`;
+  return `Plateau révélé. En attente de la révélation adverse (${mm}).`;
 }
 
 // Rafraîchit l'écran de la partie après un clic de placement (sans transaction).
