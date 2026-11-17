@@ -18,4 +18,11 @@ contract MockUSDC is ERC20 {
         require(amount <= 10_000e6, "max 10 000 jetons par appel");
         _mint(msg.sender, amount);
     }
+
+    /// @notice Pareil, mais vers une autre adresse : la clé de session du site peut ainsi
+    ///         distribuer des jetons de test au joueur sans fenêtre de confirmation.
+    function faucetTo(address to, uint256 amount) external {
+        require(amount <= 10_000e6, "max 10 000 jetons par appel");
+        _mint(to, amount);
+    }
 }

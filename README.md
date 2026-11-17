@@ -24,18 +24,20 @@ Règles communes :
 
 ## Confirmations du wallet
 
-- **Connexion** : une confirmation dans MetaMask.
-- **Première partie seulement** : une autorisation USDC (le contrat ne prélève jamais que la mise
-  choisie, au moment où vous publiez ou acceptez une annonce).
-- **Publier ou relever un défi** : une seule confirmation. Elle dépose la mise, autorise une
-  **clé de session** pour cette partie et lui envoie un peu d'ETH pour le gaz (0,0005 ETH).
-- **Coups, révélations, abandon, réclamation de victoire** : aucune confirmation. La clé de
-  session, créée et gardée dans le navigateur, les envoie à votre place.
+- **Connexion** : MetaMask demande d'autoriser le site (la première fois seulement), puis le site
+  enchaîne sur **une seule confirmation** : l'ouverture d'une **session de jeu**.
+- **La toute première fois** sur un compte, il y a en plus l'autorisation du jeton (le contrat ne
+  prélève jamais que les mises engagées).
+- **Ensuite, plus aucune fenêtre** : publier, relever un défi, jouer, révéler, abandonner,
+  recevoir des jetons de test.
 
-La clé de session ne peut que jouer la partie pour laquelle elle a été autorisée : elle ne peut ni
-retirer des fonds, ni changer de clé, et les gains vont toujours au wallet du joueur. Depuis un
-autre navigateur, le bouton « ⚡ Jouer sans confirmation » autorise une nouvelle clé (une
-confirmation). Si la clé n'a plus d'ETH, les coups repassent par MetaMask.
+La session autorise une clé jetable, créée et gardée dans le navigateur, avec un **budget de
+mises** (100 par défaut) et une **durée** (1, 7 ou 30 jours, 7 par défaut). La même transaction
+envoie à la clé 0,0005 ETH pour payer ses frais. La clé ne peut envoyer de l'argent que dans des
+parties : mises prélevées sur le wallet du joueur, gains et remboursements toujours versés au
+wallet du joueur. Elle ne peut ni retirer, ni dépasser son budget, ni prolonger la session.
+Après expiration, elle peut encore finir les parties en cours mais plus engager de mises.
+Cliquer sur « ⚡ Sans confirmation… » en haut de la page ferme la session.
 
 ## Contenu
 
