@@ -7,12 +7,14 @@ const CHAIN_ID = Number(PARAMS.get("chain") || (IS_LOCAL ? 31337 : 84532));
 const SAVED = JSON.parse(localStorage.getItem(`arene-deploiement-${CHAIN_ID}`) || "null");
 const APP_CONFIG = { ...NETWORKS[CHAIN_ID], ...(NETWORKS[CHAIN_ID]?.arena ? {} : SAVED || {}), chainId: CHAIN_ID };
 APP_CONFIG.network = APP_CONFIG.name;
-const GAMES = ["Pierre-Feuille-Ciseaux", "Morpion", "Puissance 4"];
+const GAMES = ["Pierre-Feuille-Ciseaux", "Morpion", "Puissance 4", "Duel de dés", "Bataille navale"];
 // Icône et règles affichées pour chaque jeu (un jeu absent de cette liste s'affiche quand même, sans règles).
 const GAME_INFO = {
   0: { icon: "✊", rules: "Chacun choisit pierre, feuille ou ciseaux en secret, puis révèle son coup. La pierre bat les ciseaux, les ciseaux battent la feuille, la feuille bat la pierre. Égalité : on rejoue une manche." },
   1: { icon: "⭕", rules: "Grille de 3 × 3. Le premier qui aligne 3 symboles (ligne, colonne ou diagonale) gagne. Grille pleine sans alignement : match nul." },
   2: { icon: "🔴", rules: "Grille de 7 colonnes. On choisit une colonne, le jeton tombe tout en bas. Le premier qui aligne 4 jetons (ligne, colonne ou diagonale) gagne." },
+  3: { icon: "🎲", rules: "Chacun lance un dé. Le résultat combine un secret de chaque joueur : personne ne peut le truquer. Le plus haut dé gagne, égalité : on relance." },
+  4: { icon: "🚢", rules: "Plateau de 8 × 8, bateaux de 4, 3, 3 et 2 cases, placés en secret. Chacun tire à son tour ; le premier qui coule toute la flotte adverse gagne. À la fin, les plateaux sont révélés et le contrat vérifie que personne n'a menti." },
 };
 const gameName = (g) => GAMES[Number(g)] || `Jeu n° ${Number(g)}`;
 const gameIcon = (g) => GAME_INFO[Number(g)]?.icon || "🎲";
@@ -565,6 +567,7 @@ function renderFooter() {
 
 function isMyTurn(m) {
   if (Number(m.status) !== 1 || !state.account) return false;
+  if (Number(m.game) === 3) return false; // Duel de dés : les deux joueurs agissent en même temps
   if (Number(m.game) !== 0) return same(m.turn, state.account);
   // Pierre-Feuille-Ciseaux : à vous si vous n'avez pas encore joué (ou révélé) cette manche.
   const s = state.pfcCache?.[m.id];
@@ -660,7 +663,10 @@ async function renderGame() {
       : same(m.winner, state.account) ? `🏆 Victoire ! Vous avez reçu ${fmt(net)} USDC.` : `Défaite. ${short(m.winner)} a remporté ${fmt(net)} USDC.`;
   } else if (st === 0) status = "En attente d'un adversaire.";
 
-  if (game === 0) {
+  if (game >= 3) {
+    // Duel de dés et Bataille navale : voir games-extra.js
+    status = (await renderExtraGame(m, { game, st, me, late, mm: clock, board, actions })) || status;
+  } else if (game === 0) {
     const s = (await state.readArena.pfc(m.id)).toObject();
     if (state.current !== m.id) return;
     board.innerHTML = "";

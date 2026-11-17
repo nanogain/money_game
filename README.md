@@ -4,13 +4,15 @@ Deux joueurs misent la même somme en USDC, jouent une partie, et le contrat pai
 (pot moins 2 % de frais). **Aucun oracle ni serveur** : les règles des jeux sont dans le
 smart contract, qui vérifie chaque coup et désigne lui-même le vainqueur.
 
-## Les 3 jeux
+## Les 5 jeux
 
 | Jeu | Comment le résultat est garanti |
 |---|---|
 | Pierre-Feuille-Ciseaux | Chaque joueur envoie d'abord son coup **caché** (une empreinte), puis le révèle. Personne ne peut voir le coup de l'autre avant de jouer, ni changer d'avis après. Égalité : nouvelle manche. |
 | Morpion | Chaque coup est une transaction. Le contrat refuse les coups illégaux et détecte l'alignement. |
 | Puissance 4 | Pareil : le contrat fait tomber le jeton dans la colonne et détecte les 4 alignés. |
+| Duel de dés | Chaque joueur engage un secret aléatoire, puis le révèle. Les deux dés sont tirés de la combinaison des deux secrets : aucun joueur ne peut choisir ni prévoir le résultat. Plus haut dé gagne, égalité : on relance. |
+| Bataille navale | Plateau 8x8, bateaux de 4, 3, 3 et 2 cases. Chaque joueur engage l'empreinte de son plateau (qui reste secret), le site annonce automatiquement « touché / raté », puis les deux plateaux sont révélés à la fin : le contrat vérifie la flotte et chaque annonce. Un tricheur perd la partie. |
 
 Règles communes :
 - Celui qui accepte l'annonce joue en premier.
