@@ -22,11 +22,26 @@ Règles communes :
 - On peut annuler sa propre annonce tant que personne ne l'a acceptée.
 - Les frais (2 % du pot) s'accumulent dans le contrat ; seul le propriétaire peut les retirer (`withdrawFees`).
 
+## Confirmations du wallet
+
+- **Connexion** : une confirmation dans MetaMask.
+- **Première partie seulement** : une autorisation USDC (le contrat ne prélève jamais que la mise
+  choisie, au moment où vous publiez ou acceptez une annonce).
+- **Publier ou relever un défi** : une seule confirmation. Elle dépose la mise, autorise une
+  **clé de session** pour cette partie et lui envoie un peu d'ETH pour le gaz (0,0005 ETH).
+- **Coups, révélations, abandon, réclamation de victoire** : aucune confirmation. La clé de
+  session, créée et gardée dans le navigateur, les envoie à votre place.
+
+La clé de session ne peut que jouer la partie pour laquelle elle a été autorisée : elle ne peut ni
+retirer des fonds, ni changer de clé, et les gains vont toujours au wallet du joueur. Depuis un
+autre navigateur, le bouton « ⚡ Jouer sans confirmation » autorise une nouvelle clé (une
+confirmation). Si la clé n'a plus d'ETH, les coups repassent par MetaMask.
+
 ## Contenu
 
 - `contracts/MiniJeuxArena.sol` : le contrat (annonces, mises, jeux, frais, délais).
 - `contracts/MockUSDC.sol` : faux USDC pour les tests (avec un robinet gratuit).
-- `test/arena.test.js` : 20 tests automatiques.
+- `test/` : tests automatiques (`npm test`).
 - `scripts/deploy.js` : déploiement en ligne de commande + mise à jour de `frontend/config.js`.
 - `scripts/export-frontend.js` : copie les ABI/bytecodes compilés dans `frontend/contracts.js`.
 - `frontend/deploy.html` : déploiement des contrats depuis MetaMask.
