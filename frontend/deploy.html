@@ -11,7 +11,7 @@
   <main>
     <section class="card">
       <h2>Déployer sur <span id="netName"></span></h2>
-      <p>Cette page installe les deux contrats de la plateforme depuis votre MetaMask : un faux USDC gratuit (pour les tests) et le contrat des mini-jeux.
+      <p>Cette page installe les deux contrats de la plateforme depuis votre MetaMask : un jeton de test gratuit (ARENETEST, qui remplace l’USDC sur le réseau de test) et le contrat des mini-jeux.
          Votre compte en devient le propriétaire : c'est lui qui pourra retirer les 2 % de frais. Aucune clé n'est partagée.</p>
       <p class="muted small">Il faut un peu d'ETH de test sur votre compte (environ 0,0005 ETH suffisent). MetaMask vous demandera de confirmer 2 transactions.</p>
       <div class="row"><button id="deployBtn">Connecter MetaMask et déployer</button></div>
@@ -50,11 +50,11 @@
         log(`Compte : ${me} (${ethers.formatEther(eth)} ETH)`);
         if (eth === 0n) throw new Error("Ce compte n'a pas d'ETH de test. Récupérez-en sur un robinet (faucet) puis réessayez.");
 
-        log("1/2 Déploiement du faux USDC… confirmez dans MetaMask.");
+        log("1/2 Déploiement du jeton de test… confirmez dans MetaMask.");
         const usdc = await new ethers.ContractFactory(USDC_ABI, USDC_BYTECODE, signer).deploy();
         await usdc.waitForDeployment();
         const usdcAddr = await usdc.getAddress();
-        log(`    USDC de test : ${usdcAddr}`);
+        log(`    Jeton de test : ${usdcAddr}`);
 
         log("2/2 Déploiement du contrat des mini-jeux… confirmez dans MetaMask.");
         const arena = await new ethers.ContractFactory(ARENA_ABI, ARENA_BYTECODE, signer).deploy(usdcAddr, cfg.moveTimeout || 600);
