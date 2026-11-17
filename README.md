@@ -81,11 +81,11 @@ Pour installer les contrats, sans partager aucune clé :
 
 On peut aussi déployer en ligne de commande : `PRIVATE_KEY=0x... npx hardhat run scripts/deploy.js --network baseSepolia`.
 
-### Déploiement actuel (Base Sepolia, 17/11/2026 soir : jeton ARENETEST + coups sans confirmation)
+### Déploiement actuel (Base Sepolia, 17/11/2026 soir : session de jeu, une seule confirmation)
 
-- Contrat des mini-jeux : [`0x82Fec22Bc63f9112AC779F5905E46ee7e97688fB`](https://sepolia.basescan.org/address/0x82Fec22Bc63f9112AC779F5905E46ee7e97688fB)
-- Jeton de test ARENETEST : [`0x29c55083afe52e638222D2Aa694f5A2dC2c4eEa7`](https://sepolia.basescan.org/address/0x29c55083afe52e638222D2Aa694f5A2dC2c4eEa7)
-- Propriétaire (retrait des frais) : `0x1290A4Ba39C7620d4Ff4F3a72a3A33d284AdFCF5`
+- Contrat des mini-jeux : [`0xCd0d44D59feb129B3E8A832B3Cc9d41990811288`](https://sepolia.basescan.org/address/0xCd0d44D59feb129B3E8A832B3Cc9d41990811288)
+- Jeton de test ARENETEST : [`0x64E6cD88fA2e5EAC0Dd57932A1CeAbF95F590186`](https://sepolia.basescan.org/address/0x64E6cD88fA2e5EAC0Dd57932A1CeAbF95F590186)
+- Propriétaire (retrait des frais) : `0x032A5284Fc32fA6671Baaf9221dA8dc909Cf9B64`
 
 ETH de test gratuit : robinet Coinbase, https://portal.cdp.coinbase.com/onchain-tools/faucet
 (le robinet Alchemy exige de l'activité sur le réseau principal).
