@@ -73,12 +73,12 @@ function errMsg(e) {
   return m;
 }
 
-async function tx(label, fn) {
+async function tx(label, fn, { session = false } = {}) {
   if (state.busy) return;
   state.busy = true;
   document.body.style.cursor = "progress";
   try {
-    notify(`${label} : confirmez dans votre wallet…`);
+    notify(session ? `${label} : envoi…` : `${label} : confirmez dans votre wallet…`);
     const t = await fn();
     notify(`${label} : transaction envoyée, en attente de confirmation…`, false, txLink(t.hash));
     await t.wait();
@@ -145,6 +145,7 @@ async function useAccount(account) {
   state.readArena = state.arena;
   state.current = null;
   state.warnedEth = false;
+  state.sessionKeysCache = {};
   state.historyShown = HISTORY_PAGE;
   $("gameCard").hidden = true;
   $("account").textContent = short(state.account);
@@ -197,10 +198,105 @@ if (window.ethereum?.on) {
   window.ethereum.on("chainChanged", () => location.reload());
 }
 
+// Autorisation USDC donnée une seule fois (pour toutes les parties) : ensuite, publier ou
+// relever un défi ne demande plus qu'une seule confirmation. Le contrat ne prélève jamais
+// que la mise choisie, et uniquement quand vous publiez ou acceptez une annonce.
 async function ensureAllowance(amount) {
   const allowance = await state.usdc.allowance(state.account, APP_CONFIG.arena);
   if (allowance >= amount) return;
-  await tx("Autorisation USDC", () => state.usdc.approve(APP_CONFIG.arena, amount));
+  notify("Première partie : autorisez une fois le contrat à prendre vos mises en USDC. Ensuite, une seule confirmation par partie.");
+  await tx("Autorisation USDC (une seule fois)", () => state.usdc.approve(APP_CONFIG.arena, ethers.MaxUint256));
+}
+
+// ------------------------------------------------------------------ clé de session
+// Pour jouer sans fenêtre de confirmation, le navigateur crée une clé jetable (gardée dans ce
+// navigateur). En publiant ou en acceptant un défi, votre wallet l'autorise pour CETTE partie
+// et lui envoie un tout petit peu d'ETH pour le gaz, dans la même transaction. La clé joue
+// ensuite vos coups toute seule. Elle ne peut que jouer cette partie : les mises et les gains
+// restent liés à votre wallet, la clé ne peut jamais les prendre.
+
+// Gaz envoyé à la clé : 0,0005 ETH suffit pour des centaines de coups sur Base (plus en local).
+const SESSION_GAS = ethers.parseEther(String(APP_CONFIG.sessionGas || (CHAIN_ID === 31337 ? "0.05" : "0.0005")));
+const sessionStoreKey = () => `arene-session:${APP_CONFIG.arena}:${state.account}`.toLowerCase();
+
+let sessionSupport = null;
+async function sessionSupported() {
+  if (sessionSupport === null) {
+    // Les contrats déployés avant cette version n'ont pas de clés de session.
+    sessionSupport = await state.readArena.sessionKeys(0).then(() => true, () => false);
+  }
+  return sessionSupport;
+}
+
+function sessionWallet() {
+  if (!state.account || !APP_CONFIG.rpc) return null;
+  let pk = localStorage.getItem(sessionStoreKey());
+  if (!pk) {
+    pk = ethers.Wallet.createRandom().privateKey;
+    localStorage.setItem(sessionStoreKey(), pk);
+  }
+  state.rpc ||= new ethers.JsonRpcProvider(APP_CONFIG.rpc, APP_CONFIG.chainId, { staticNetwork: true });
+  return new ethers.Wallet(pk, state.rpc);
+}
+
+// ETH à envoyer à la clé avec la mise : de quoi recharger jusqu'à SESSION_GAS (0 si elle en a assez,
+// ou si le wallet n'a pas assez d'ETH : les coups demanderont alors une confirmation).
+async function sessionTopUp(w) {
+  const bal = await state.rpc.getBalance(w.address).catch(() => 0n);
+  if (bal >= SESSION_GAS / 4n) return 0n;
+  const value = SESSION_GAS - bal;
+  if (state.eth !== null && state.eth < value * 2n) return 0n;
+  return value;
+}
+
+// Clé de session utilisable dans cette partie, ou null (le coup passe alors par le wallet).
+async function sessionFor(id) {
+  if (!state.account || !(await sessionSupported())) return null;
+  const m = state.matches.find((x) => x.id === Number(id));
+  if (!m) return null;
+  const w = sessionWallet();
+  if (!w) return null;
+  const k = await state.readArena.sessionKeys(id);
+  const mine = same(m.creator, state.account) ? k.creator : k.opponent;
+  if (!same(mine, w.address)) return null;
+  return (await hasGas(w)) ? w : null;
+}
+
+// La clé a-t-elle assez d'ETH pour payer un coup (le plus cher : révélation de la Bataille navale) ?
+async function hasGas(w) {
+  const [bal, fee] = await Promise.all([state.rpc.getBalance(w.address), state.rpc.getFeeData()]);
+  const price = fee.maxFeePerGas || fee.gasPrice || 0n;
+  return bal >= price * 400000n;
+}
+
+// État de la clé pour l'écran de partie : "on" (actif), "empty" (plus d'ETH), "off" (pas autorisée ici).
+async function sessionStatus(m) {
+  if (!state.account || !(await sessionSupported())) return null;
+  const w = sessionWallet();
+  if (!w) return null;
+  state.sessionKeysCache ||= {};
+  let k = state.sessionKeysCache[m.id];
+  if (!k) k = state.sessionKeysCache[m.id] = (await state.readArena.sessionKeys(m.id)).toObject();
+  const mine = same(m.creator, state.account) ? k.creator : k.opponent;
+  if (!same(mine, w.address)) return "off";
+  return (await hasGas(w)) ? "on" : "empty";
+}
+
+// Activer (ou recharger) le jeu sans confirmation dans une partie déjà commencée : 1 confirmation.
+async function enableSession(id) {
+  const w = sessionWallet();
+  const bal = await state.rpc.getBalance(w.address).catch(() => 0n);
+  const value = bal >= SESSION_GAS / 4n ? 0n : SESSION_GAS - bal;
+  await tx("Jeu sans confirmation", () => state.arena.setSessionKey(id, w.address, { value }));
+  if (state.sessionKeysCache) delete state.sessionKeysCache[id];
+  await renderGame();
+}
+
+// Coup de jeu : envoyé par la clé de session si possible (aucune fenêtre), sinon par le wallet.
+async function gameTx(id, label, method, ...args) {
+  const w = await sessionFor(id).catch(() => null);
+  if (!w) return tx(label, () => state.arena[method](...args));
+  return tx(label, () => state.arena.connect(w)[method](...args), { session: true });
 }
 
 // ------------------------------------------------------------------ actions
@@ -215,7 +311,14 @@ async function createMatch() {
   if (state.usdcBal !== null && stake > state.usdcBal) return notify(`Solde insuffisant : vous avez ${fmt(state.usdcBal)} USDC.`, true);
   await ensureAllowance(stake);
   const before = Number(await state.readArena.matchCount());
-  await tx("Publication de l'annonce", () => state.arena.createMatch(game, stake));
+  if (await sessionSupported()) {
+    // Une seule confirmation : mise + autorisation de la clé de session + gaz pour ses coups.
+    const w = sessionWallet();
+    const value = await sessionTopUp(w);
+    await tx("Publication de l'annonce", () => state.arena.createMatchWithSession(game, stake, w.address, { value }));
+  } else {
+    await tx("Publication de l'annonce", () => state.arena.createMatch(game, stake));
+  }
   // Propose tout de suite le lien à envoyer à un ami.
   const mine = state.matches.find((m) => m.id > before && same(m.creator, state.account) && Number(m.status) === 0);
   if (mine) notify(`Annonce n° ${mine.id} publiée ✔ Envoyez le lien d'invitation à un ami avec le bouton « Copier le lien ».`);
@@ -225,14 +328,20 @@ async function joinMatch(id, stake) {
   if (!state.account) return connect({ pick: true }).catch((e) => notify(errMsg(e), true));
   if (state.usdcBal !== null && BigInt(stake) > state.usdcBal) return notify(`Solde insuffisant : il faut ${fmt(stake)} USDC, vous en avez ${fmt(state.usdcBal)}.`, true);
   await ensureAllowance(stake);
-  await tx("Acceptation du défi", () => state.arena.joinMatch(id));
+  if (await sessionSupported()) {
+    const w = sessionWallet();
+    const value = await sessionTopUp(w);
+    await tx("Acceptation du défi", () => state.arena.joinMatchWithSession(id, w.address, { value }));
+  } else {
+    await tx("Acceptation du défi", () => state.arena.joinMatch(id));
+  }
   openGame(id);
 }
 
-const cancelMatch = (id) => tx("Annulation", () => state.arena.cancelMatch(id));
-const play = (id, pos) => tx("Coup", () => state.arena.play(id, pos));
-const resign = (id) => tx("Abandon", () => state.arena.resign(id));
-const claimTimeout = (id) => tx("Victoire par délai", () => state.arena.claimTimeout(id));
+const cancelMatch = (id) => gameTx(id, "Annulation", "cancelMatch", id);
+const play = (id, pos) => gameTx(id, "Coup", "play", id, pos);
+const resign = (id) => gameTx(id, "Abandon", "resign", id);
+const claimTimeout = (id) => gameTx(id, "Victoire par délai", "claimTimeout", id);
 const withdrawFees = () => tx("Retrait des frais", () => state.arena.withdrawFees(state.account));
 
 function inviteLink(id) {
@@ -279,13 +388,13 @@ async function pfcCommit(id, round, move) {
   const hash = await localPfcHash(id, round, state.account, move, salt);
   // Le coup et le sel restent dans ce navigateur jusqu'à la révélation.
   localStorage.setItem(secretKey(id, round), JSON.stringify({ move, salt }));
-  await tx(`Coup caché (${PFC_NAMES[move]})`, () => state.arena.commitPfc(id, hash));
+  await gameTx(id, `Coup caché (${PFC_NAMES[move]})`, "commitPfc", id, hash);
 }
 
 async function pfcReveal(id, round) {
   const saved = JSON.parse(localStorage.getItem(secretKey(id, round)) || "null");
   if (!saved) return notify("Coup introuvable dans ce navigateur : il faut révéler depuis le navigateur qui a joué.", true);
-  await tx("Révélation", () => state.arena.revealPfc(id, saved.move, saved.salt));
+  await gameTx(id, "Révélation", "revealPfc", id, saved.move, saved.salt);
 }
 
 // ------------------------------------------------------------------ lecture de la blockchain
@@ -737,6 +846,13 @@ async function renderGame() {
     }
   }
   if (st === 1 && me) actions.appendChild(button("Abandonner", () => { if (confirm("Abandonner ? L'adversaire remporte le pot.")) resign(m.id).catch(() => {}); }, "danger"));
+  if ((st === 0 || st === 1) && me) {
+    const ss = await sessionStatus(m).catch(() => null);
+    if (state.current !== m.id) return;
+    if (ss === "on") status += ' <span class="muted small">⚡ Vos coups partent sans confirmation du wallet.</span>';
+    else if (ss === "off") actions.appendChild(button("⚡ Jouer sans confirmation", () => enableSession(m.id).catch(() => {}), "ghost"));
+    else if (ss === "empty") actions.appendChild(button("⚡ Recharger le gaz des coups", () => enableSession(m.id).catch(() => {}), "ghost"));
+  }
   $("gameStatus").innerHTML = status;
 }
 

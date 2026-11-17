@@ -1,6 +1,7 @@
-/* global ethers, APP_CONFIG, state, tx, notify, button, renderGame */
+/* global ethers, APP_CONFIG, state, gameTx, notify, button, renderGame */
 // Écrans des jeux « Duel de dés » (game 3) et « Bataille navale » (game 4).
-// Utilise les fonctions communes de app.js (tx, notify, button, state…).
+// Utilise les fonctions communes de app.js (gameTx, notify, button, state…).
+// gameTx envoie le coup avec la clé de session (sans fenêtre de confirmation) quand c'est possible.
 
 const ABI = ethers.AbiCoder.defaultAbiCoder();
 const DICE_FACES = ["", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
@@ -10,7 +11,7 @@ const COLS = "ABCDEFGH";
 const cellName = (c) => `${COLS[c % 8]}${Math.floor(c / 8) + 1}`;
 const bitSet = (mask, c) => ((BigInt(mask) >> BigInt(c)) & 1n) === 1n;
 const popcount = (mask) => { let v = BigInt(mask), n = 0; while (v) { v &= v - 1n; n++; } return n; };
-const lateButton = (actions, id) => actions.appendChild(button("Réclamer la victoire (adversaire inactif)", () => tx("Victoire par délai", () => state.arena.claimTimeout(id))));
+const lateButton = (actions, id) => actions.appendChild(button("Réclamer la victoire (adversaire inactif)", () => gameTx(id, "Victoire par délai", "claimTimeout", id).catch(() => {})));
 
 // Empreintes calculées dans le navigateur : le secret ne part jamais vers le nœud RPC.
 function diceHashLocal(id, round, player, secret) {
@@ -56,7 +57,7 @@ async function renderDice(m, { st, me, late, mm, board, actions }) {
     actions.appendChild(button("🎲 Lancer les dés", async () => {
       const secret = ethers.hexlify(ethers.randomBytes(32));
       localStorage.setItem(diceKey(m.id, round), secret);
-      await tx("Lancer des dés", () => state.arena.commitDice(m.id, diceHashLocal(m.id, round, state.account, secret)));
+      await gameTx(m.id, "Lancer des dés", "commitDice", m.id, diceHashLocal(m.id, round, state.account, secret)).catch(() => {});
     }));
   } else if (theirCommit === empty) {
     status = roundTxt + `Dés lancés. En attente de l'adversaire (${mm}).`;
@@ -65,7 +66,7 @@ async function renderDice(m, { st, me, late, mm, board, actions }) {
     actions.appendChild(button("Révéler les dés", async () => {
       const secret = localStorage.getItem(diceKey(m.id, round));
       if (!secret) return notify("Secret introuvable dans ce navigateur : il faut révéler depuis le navigateur qui a lancé.", true);
-      await tx("Révélation", () => state.arena.revealDice(m.id, secret));
+      await gameTx(m.id, "Révélation", "revealDice", m.id, secret).catch(() => {});
     }));
   } else {
     status = roundTxt + `Révélé. En attente de la révélation adverse (${mm}).`;
@@ -163,7 +164,7 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
         const f = { xs: p.ships.map((s) => s.x), ys: p.ships.map((s) => s.y), v: p.ships.map((s) => s.v) };
         // Le plateau et le sel restent dans ce navigateur jusqu'à la révélation finale.
         localStorage.setItem(navalKey(m.id), JSON.stringify({ ships: p.ships, salt }));
-        await tx("Validation de la flotte", () => state.arena.commitNavalBoard(m.id, navalHashLocal(m.id, state.account, f, salt)));
+        await gameTx(m.id, "Validation de la flotte", "commitNavalBoard", m.id, navalHashLocal(m.id, state.account, f, salt)).catch(() => {});
       }));
     }
     const next = p.ships.length < 4 ? `Placez le bateau de ${NAVAL_SIZES[p.ships.length]} cases.` : "Flotte complète : validez-la.";
@@ -185,7 +186,7 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
     if (bitSet(theirShots, c)) el.classList.add(bitSet(theirHits, c) || (pendingAtMe && c === pending && answer) ? "hit" : "miss");
     if (pendingAtMe && c === pending) el.classList.add("pending");
   }));
-  const fire = (c) => tx(`Tir en ${cellName(c)}`, () => state.arena.navalTurn(m.id, answer, c));
+  const fire = (c) => gameTx(m.id, `Tir en ${cellName(c)}`, "navalTurn", m.id, answer, c).catch(() => {});
   wrap.appendChild(grid(`Flotte adverse · ${popcount(myHits)}/${NAVAL_CELLS} touchés`, (c, el) => {
     if (bitSet(myShots, c)) el.classList.add(bitSet(myHits, c) ? "hit" : "miss");
     else if (myTurn && !lastHitToLose && !iShotAll) { el.classList.add("target"); el.onclick = () => fire(c); }
@@ -204,7 +205,7 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
     if (pendingAtMe && !saved) return "Plateau introuvable dans ce navigateur : il faut jouer depuis le navigateur qui a placé la flotte.";
     const report = pendingAtMe ? `L'adversaire a tiré en ${cellName(pending)} : ${answer ? "touché" : "raté"} (annoncé automatiquement). ` : "";
     if (lastHitToLose || iShotAll) {
-      actions.appendChild(button("Continuer vers la révélation", () => tx("Fin des tirs", () => state.arena.navalTurn(m.id, answer, 0))));
+      actions.appendChild(button("Continuer vers la révélation", () => gameTx(m.id, "Fin des tirs", "navalTurn", m.id, answer, 0).catch(() => {})));
       return report + (lastHitToLose ? "Votre dernier bateau est coulé." : "Vous avez visé toutes les cases.") + " Place à la vérification des plateaux.";
     }
     return report + `À vous de tirer : cliquez une case du plateau adverse (${mm}).`;
@@ -215,7 +216,7 @@ async function renderNaval(m, { st, me, late, mm, board, actions }) {
     actions.appendChild(button("Révéler mon plateau", async () => {
       if (!saved) return notify("Plateau introuvable dans ce navigateur : il faut révéler depuis le navigateur qui a placé la flotte.", true);
       const s = saved.ships;
-      await tx("Révélation du plateau", () => state.arena.revealNavalBoard(m.id, s.map((x) => x.x), s.map((x) => x.y), s.map((x) => x.v), saved.salt));
+      await gameTx(m.id, "Révélation du plateau", "revealNavalBoard", m.id, s.map((x) => x.x), s.map((x) => x.y), s.map((x) => x.v), saved.salt).catch(() => {});
     }));
     return "Fin des tirs. Révélez votre plateau : le contrat vérifie que chacun a annoncé ses touchés honnêtement.";
   }

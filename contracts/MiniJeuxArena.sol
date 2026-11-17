@@ -92,6 +92,17 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     ///         l'émetteur du jeton). Récupérables avec withdraw().
     mapping(address => uint256) public owed;
 
+    /// @notice Clé de session : une adresse jetable (générée et gardée dans le navigateur) que
+    ///         chaque joueur autorise, pour une partie donnée, à jouer ses coups à sa place.
+    ///         Les coups partent alors sans fenêtre de confirmation du wallet.
+    ///         La clé ne peut QUE jouer cette partie (coups, révélations, abandon, annulation de
+    ///         l'annonce) : elle ne touche jamais aux fonds, les gains vont toujours au joueur.
+    struct SessionKeys {
+        address creator;
+        address opponent;
+    }
+    mapping(uint256 => SessionKeys) public sessionKeys;
+
     event MatchCreated(uint256 indexed id, address indexed creator, GameType game, uint256 stake);
     event MatchJoined(uint256 indexed id, address indexed opponent);
     event MatchCancelled(uint256 indexed id);
@@ -110,6 +121,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     event NavalRevealed(uint256 indexed id, address indexed player, bool honest);
     event PaymentDeferred(address indexed to, uint256 amount);
     event Withdrawn(address indexed from, address indexed to, uint256 amount);
+    event SessionKeySet(uint256 indexed id, address indexed player, address key);
 
     error InvalidState();
     error NotPlayer();
@@ -127,6 +139,23 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Publier une annonce : choisit le jeu et dépose sa mise.
     function createMatch(GameType game, uint256 stake) external nonReentrant returns (uint256 id) {
+        id = _create(game, stake);
+    }
+
+    /// @notice Publier une annonce et autoriser une clé de session pour cette partie, en une
+    ///         seule transaction. L'ETH envoyé (facultatif) est transféré à la clé pour payer
+    ///         le gaz de ses coups.
+    function createMatchWithSession(GameType game, uint256 stake, address sessionKey)
+        external
+        payable
+        nonReentrant
+        returns (uint256 id)
+    {
+        id = _create(game, stake);
+        _setSessionKey(id, msg.sender, sessionKey);
+    }
+
+    function _create(GameType game, uint256 stake) internal returns (uint256 id) {
         if (stake < MIN_STAKE) revert StakeTooLow();
         id = ++matchCount;
         Match storage m = matches[id];
@@ -143,7 +172,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     function cancelMatch(uint256 id) external nonReentrant {
         Match storage m = matches[id];
         if (m.status != Status.Open) revert InvalidState();
-        if (msg.sender != m.creator) revert NotPlayer();
+        if (_player(id) != m.creator) revert NotPlayer(); // la mise revient toujours au créateur
         m.status = Status.Cancelled;
         token.safeTransfer(m.creator, m.stake);
         emit MatchCancelled(id);
@@ -151,9 +180,28 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Accepter une annonce : dépose la même mise. L'accepteur joue en premier.
     function joinMatch(uint256 id) external nonReentrant {
+        _join(id);
+    }
+
+    /// @notice Accepter une annonce et autoriser une clé de session, en une seule transaction.
+    function joinMatchWithSession(uint256 id, address sessionKey) external payable nonReentrant {
+        _join(id);
+        _setSessionKey(id, msg.sender, sessionKey);
+    }
+
+    /// @notice Autoriser (ou remplacer) sa clé de session pour une partie, par exemple après un
+    ///         changement de navigateur. Seul le wallet du joueur peut le faire.
+    function setSessionKey(uint256 id, address sessionKey) external payable nonReentrant {
+        Match storage m = matches[id];
+        if (m.status != Status.Open && m.status != Status.Active) revert InvalidState();
+        if (msg.sender != m.creator && msg.sender != m.opponent) revert NotPlayer();
+        _setSessionKey(id, msg.sender, sessionKey);
+    }
+
+    function _join(uint256 id) internal {
         Match storage m = matches[id];
         if (m.status != Status.Open) revert InvalidState();
-        if (msg.sender == m.creator) revert NotPlayer();
+        if (msg.sender == m.creator || msg.sender == sessionKeys[id].creator) revert NotPlayer();
         m.opponent = msg.sender;
         m.status = Status.Active;
         m.turn = msg.sender;
@@ -162,14 +210,48 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         emit MatchJoined(id, msg.sender);
     }
 
+    // ------------------------------------------------------------------ clés de session
+
+    function _setSessionKey(uint256 id, address player, address key) internal {
+        Match storage m = matches[id];
+        SessionKeys storage k = sessionKeys[id];
+        if (key != address(0)) {
+            // La clé ne doit se confondre avec aucun autre acteur de la partie.
+            if (key == m.creator || key == m.opponent) revert InvalidMove();
+            if (key == (player == m.creator ? k.opponent : k.creator)) revert InvalidMove();
+        }
+        if (player == m.creator) k.creator = key;
+        else k.opponent = key;
+        emit SessionKeySet(id, player, key);
+        if (msg.value > 0) {
+            // Petit montant d'ETH pour le gaz des coups joués par la clé.
+            if (key == address(0)) revert InvalidMove();
+            (bool ok, ) = key.call{value: msg.value}("");
+            if (!ok) revert InvalidMove();
+        }
+    }
+
+    /// @dev Joueur au nom duquel agit l'appelant : lui-même, ou le joueur qui a autorisé cette
+    ///      clé de session pour cette partie. Pour un inconnu, renvoie l'appelant (les contrôles
+    ///      habituels le rejettent ensuite).
+    function _player(uint256 id) internal view returns (address) {
+        Match storage m = matches[id];
+        if (msg.sender == m.creator || msg.sender == m.opponent) return msg.sender;
+        SessionKeys storage k = sessionKeys[id];
+        if (msg.sender == k.creator) return m.creator;
+        if (msg.sender == k.opponent) return m.opponent;
+        return msg.sender;
+    }
+
     // ------------------------------------------------------------------ jeux de plateau
 
     /// @notice Jouer un coup. Morpion : case 0-8. Puissance 4 : colonne 0-6.
     function play(uint256 id, uint8 position) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         if (m.status != Status.Active || (m.game != GameType.Morpion && m.game != GameType.Puissance4)) revert InvalidState();
-        if (msg.sender != m.turn) revert NotYourTurn();
-        uint256 mark = msg.sender == m.creator ? 1 : 2;
+        if (player != m.turn) revert NotYourTurn();
+        uint256 mark = player == m.creator ? 1 : 2;
 
         bool won;
         uint8 maxMoves;
@@ -192,14 +274,14 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         }
         m.moves += 1;
         m.lastActionAt = uint64(block.timestamp);
-        emit Moved(id, msg.sender, position);
+        emit Moved(id, player, position);
 
         if (won) {
-            _finish(id, msg.sender);
+            _finish(id, player);
         } else if (m.moves == maxMoves) {
             _finish(id, address(0)); // match nul
         } else {
-            m.turn = msg.sender == m.creator ? m.opponent : m.creator;
+            m.turn = player == m.creator ? m.opponent : m.creator;
         }
     }
 
@@ -213,40 +295,42 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Étape 1 : chaque joueur envoie son coup caché (empreinte).
     function commitPfc(uint256 id, bytes32 commitment) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         if (m.status != Status.Active || m.game != GameType.PierreFeuilleCiseaux) revert InvalidState();
         // Une empreinte nulle ne compterait pas comme un coup mais repousserait le délai :
         // un joueur pourrait bloquer la partie indéfiniment.
         if (commitment == bytes32(0)) revert InvalidMove();
         PfcState storage s = pfc[id];
-        if (msg.sender == m.creator) {
+        if (player == m.creator) {
             if (s.commitCreator != 0) revert InvalidState();
             s.commitCreator = commitment;
-        } else if (msg.sender == m.opponent) {
+        } else if (player == m.opponent) {
             if (s.commitOpponent != 0) revert InvalidState();
             s.commitOpponent = commitment;
         } else revert NotPlayer();
         m.lastActionAt = uint64(block.timestamp);
-        emit PfcCommitted(id, msg.sender, m.moves);
+        emit PfcCommitted(id, player, m.moves);
     }
 
     /// @notice Étape 2 : une fois les deux coups cachés envoyés, chacun révèle son coup et son sel.
     function revealPfc(uint256 id, uint8 move, bytes32 salt) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         if (m.status != Status.Active || m.game != GameType.PierreFeuilleCiseaux) revert InvalidState();
         PfcState storage s = pfc[id];
         if (s.commitCreator == 0 || s.commitOpponent == 0) revert InvalidState();
         if (move < 1 || move > 3) revert InvalidMove();
-        bytes32 h = pfcHash(id, m.moves, msg.sender, move, salt);
-        if (msg.sender == m.creator) {
+        bytes32 h = pfcHash(id, m.moves, player, move, salt);
+        if (player == m.creator) {
             if (s.revealCreator != 0 || h != s.commitCreator) revert InvalidMove();
             s.revealCreator = move;
-        } else if (msg.sender == m.opponent) {
+        } else if (player == m.opponent) {
             if (s.revealOpponent != 0 || h != s.commitOpponent) revert InvalidMove();
             s.revealOpponent = move;
         } else revert NotPlayer();
         m.lastActionAt = uint64(block.timestamp);
-        emit PfcRevealed(id, msg.sender, move, m.moves);
+        emit PfcRevealed(id, player, move, m.moves);
 
         if (s.revealCreator != 0 && s.revealOpponent != 0) {
             uint8 a = s.revealCreator;
@@ -274,38 +358,40 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     }
 
     function commitDice(uint256 id, bytes32 commitment) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         if (m.status != Status.Active || m.game != GameType.DuelDeDes) revert InvalidState();
         DiceState storage d = dice[id];
         if (commitment == 0) revert InvalidMove(); // sinon on pourrait repousser le délai indéfiniment
-        if (msg.sender == m.creator) {
+        if (player == m.creator) {
             if (d.commitCreator != 0) revert InvalidState();
             d.commitCreator = commitment;
-        } else if (msg.sender == m.opponent) {
+        } else if (player == m.opponent) {
             if (d.commitOpponent != 0) revert InvalidState();
             d.commitOpponent = commitment;
         } else revert NotPlayer();
         m.lastActionAt = uint64(block.timestamp);
-        emit DiceCommitted(id, msg.sender, m.moves);
+        emit DiceCommitted(id, player, m.moves);
     }
 
     function revealDice(uint256 id, bytes32 secret) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         if (m.status != Status.Active || m.game != GameType.DuelDeDes) revert InvalidState();
         DiceState storage d = dice[id];
         if (d.commitCreator == 0 || d.commitOpponent == 0) revert InvalidState();
-        bytes32 h = diceHash(id, m.moves, msg.sender, secret);
-        if (msg.sender == m.creator) {
+        bytes32 h = diceHash(id, m.moves, player, secret);
+        if (player == m.creator) {
             if (d.revealedCreator || h != d.commitCreator) revert InvalidMove();
             d.revealedCreator = true;
             d.secretCreator = secret;
-        } else if (msg.sender == m.opponent) {
+        } else if (player == m.opponent) {
             if (d.revealedOpponent || h != d.commitOpponent) revert InvalidMove();
             d.revealedOpponent = true;
             d.secretOpponent = secret;
         } else revert NotPlayer();
         m.lastActionAt = uint64(block.timestamp);
-        emit DiceRevealed(id, msg.sender, m.moves);
+        emit DiceRevealed(id, player, m.moves);
 
         if (d.revealedCreator && d.revealedOpponent) {
             uint256 r = uint256(keccak256(abi.encode(d.secretCreator, d.secretOpponent)));
@@ -362,19 +448,20 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Placement : chaque joueur engage l'empreinte de son plateau (qui reste secret).
     function commitNavalBoard(uint256 id, bytes32 commitment) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         NavalState storage n = naval[id];
         if (m.status != Status.Active || m.game != GameType.BatailleNavale || n.phase != 0) revert InvalidState();
         if (commitment == 0) revert InvalidMove();
-        if (msg.sender == m.creator) {
+        if (player == m.creator) {
             if (n.commitCreator != 0) revert InvalidState();
             n.commitCreator = commitment;
-        } else if (msg.sender == m.opponent) {
+        } else if (player == m.opponent) {
             if (n.commitOpponent != 0) revert InvalidState();
             n.commitOpponent = commitment;
         } else revert NotPlayer();
         m.lastActionAt = uint64(block.timestamp);
-        emit NavalBoardCommitted(id, msg.sender);
+        emit NavalBoardCommitted(id, player);
         if (n.commitCreator != 0 && n.commitOpponent != 0) n.phase = 1; // l'accepteur (m.turn) tire en premier
     }
 
@@ -382,11 +469,12 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     ///         Au tout premier tir, `prevHit` est ignoré. Si cette réponse donne la victoire à
     ///         l'adversaire (ou si tout le plateau a été visé), la partie passe à la révélation.
     function navalTurn(uint256 id, bool prevHit, uint8 cell) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         NavalState storage n = naval[id];
         if (m.status != Status.Active || m.game != GameType.BatailleNavale || n.phase != 1) revert InvalidState();
-        if (msg.sender != m.turn) revert NotYourTurn();
-        bool isCreator = msg.sender == m.creator;
+        if (player != m.turn) revert NotYourTurn();
+        bool isCreator = player == m.creator;
         m.lastActionAt = uint64(block.timestamp);
 
         if (n.hasPending) {
@@ -396,7 +484,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
                 if (isCreator) n.hitsByOpponent |= bit;
                 else n.hitsByCreator |= bit;
             }
-            emit NavalAnswered(id, msg.sender, n.pendingCell, prevHit);
+            emit NavalAnswered(id, player, n.pendingCell, prevHit);
             uint64 otherHits = isCreator ? n.hitsByOpponent : n.hitsByCreator;
             if (_popcount(otherHits) >= NAVAL_SHIP_CELLS) {
                 n.phase = 2;
@@ -418,7 +506,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         n.pendingCell = cell;
         n.hasPending = true;
         m.turn = isCreator ? m.opponent : m.creator;
-        emit NavalShot(id, msg.sender, cell);
+        emit NavalShot(id, player, cell);
     }
 
     /// @notice Fin de partie : chacun révèle son plateau. Le contrat vérifie que la flotte est valide
@@ -430,13 +518,14 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         bool[4] calldata vertical,
         bytes32 salt
     ) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         NavalState storage n = naval[id];
         if (m.status != Status.Active || m.game != GameType.BatailleNavale || n.phase != 2) revert InvalidState();
-        bool isCreator = msg.sender == m.creator;
-        if (!isCreator && msg.sender != m.opponent) revert NotPlayer();
+        bool isCreator = player == m.creator;
+        if (!isCreator && player != m.opponent) revert NotPlayer();
         if ((isCreator ? n.revealCreator : n.revealOpponent) != 0) revert InvalidState();
-        if (navalHash(id, msg.sender, xs, ys, vertical, salt) != (isCreator ? n.commitCreator : n.commitOpponent)) {
+        if (navalHash(id, player, xs, ys, vertical, salt) != (isCreator ? n.commitCreator : n.commitOpponent)) {
             revert InvalidMove(); // mauvais plateau ou mauvais sel : on peut réessayer
         }
 
@@ -448,7 +537,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
         if (isCreator) n.revealCreator = honest ? 1 : 2;
         else n.revealOpponent = honest ? 1 : 2;
         m.lastActionAt = uint64(block.timestamp);
-        emit NavalRevealed(id, msg.sender, honest);
+        emit NavalRevealed(id, player, honest);
 
         if (!honest) {
             // tricheur démasqué : l'autre gagne, sauf s'il a déjà été démasqué lui aussi
@@ -517,10 +606,11 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
 
     /// @notice Abandonner : l'adversaire gagne.
     function resign(uint256 id) external nonReentrant {
+        address player = _player(id);
         Match storage m = matches[id];
         if (m.status != Status.Active) revert InvalidState();
-        if (msg.sender == m.creator) _finish(id, m.opponent);
-        else if (msg.sender == m.opponent) _finish(id, m.creator);
+        if (player == m.creator) _finish(id, m.opponent);
+        else if (player == m.opponent) _finish(id, m.creator);
         else revert NotPlayer();
     }
 
