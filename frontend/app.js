@@ -221,7 +221,10 @@ async function ensureAllowance(amount) {
 // wallet, les gains et remboursements reviennent toujours sur votre wallet. Elle ne peut ni
 // retirer, ni dépasser le budget, ni prolonger la session.
 
-const SESSION_GAS = ethers.parseEther(String(APP_CONFIG.sessionGas || (CHAIN_ID === 31337 ? "0.05" : "0.0005")));
+// Sur Base, un coup coûte environ 0,000001 ETH : 0,0002 ETH suffit pour des centaines d'actions.
+const SESSION_GAS = ethers.parseEther(String(APP_CONFIG.sessionGas || (CHAIN_ID === 31337 ? "0.05" : "0.0002")));
+// ETH laissé sur le wallet quand on alimente la clé (MetaMask paie parfois les frais du wallet lui-même).
+const ETH_RESERVE = ethers.parseEther(CHAIN_ID === 31337 ? "0.001" : "0.00002");
 const SESSION_PREFS = "arene-session-reglages";
 const sessionStoreKey = () => `arene-session:${APP_CONFIG.arena}:${state.account}`.toLowerCase();
 
@@ -323,9 +326,16 @@ async function activateSession() {
     await tx("Autorisation des mises (une seule fois)", () => state.usdc.approve(APP_CONFIG.arena, ethers.MaxUint256));
   }
   const w = sessionWallet();
-  const bal = await state.rpc.getBalance(w.address).catch(() => 0n);
+  const bal = await readVia((p) => p.getBalance(w.address)).catch(() => 0n);
+  // La clé paie elle-même les frais de ses transactions : on lui envoie un peu d'ETH dans la même
+  // transaction, plafonné à ce que le wallet peut donner (même s'il a très peu d'ETH).
   let value = bal >= SESSION_GAS / 2n ? 0n : SESSION_GAS - bal;
-  if (state.eth !== null && state.eth < value * 2n) value = 0n; // pas assez d'ETH : la clé ne pourra pas agir
+  const eth = state.eth ?? (await readVia((p) => p.getBalance(state.account)).catch(() => 0n));
+  const spare = eth > ETH_RESERVE ? eth - ETH_RESERVE : 0n;
+  if (value > spare) value = spare;
+  if (bal + value === 0n) {
+    return notify(`Il faut un tout petit peu d'ETH de test sur votre wallet pour payer les frais du jeu sans confirmation. Robinet gratuit : ${ETH_FAUCET}`, true);
+  }
   await tx("Activation du jeu sans confirmation", () => state.arena.openSession(w.address, budget, days * 86400, { value }));
 }
 
@@ -350,10 +360,15 @@ function renderSession() {
   const show = !!state.account && sessionSupport === true && s && !sessionReady(1n);
   card.hidden = !show;
   const info = $("sessionInfo");
-  if (state.account && s && s.on && s.canStake) {
+  if (state.account && s && s.on && s.canStake && !s.gasOk) {
+    info.textContent = "⚠️ Session sans ETH pour les frais : cliquez pour la recharger (1 confirmation)";
+    info.title = "";
+    info.dataset.action = "recharge";
+  } else if (state.account && s && s.on && s.canStake) {
     const until = new Date(s.expiresAt * 1000).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
     info.textContent = `⚡ Sans confirmation · budget ${fmt(s.budget)} USDC · jusqu'au ${until}`;
     info.title = "Cliquez pour arrêter le jeu sans confirmation sur ce compte";
+    info.dataset.action = "fermer";
   } else {
     info.textContent = "";
   }
@@ -936,7 +951,10 @@ $("faucetBtn").onclick = () => {
   send.catch(() => {});
 };
 $("sessionBtn").onclick = () => activateSession().catch(() => {});
-$("sessionInfo").onclick = () => { if (confirm("Arrêter le jeu sans confirmation sur ce compte ? (une confirmation MetaMask)")) closeSession().catch(() => {}); };
+$("sessionInfo").onclick = () => {
+  if ($("sessionInfo").dataset.action === "recharge") return activateSession().catch(() => {});
+  if (confirm("Arrêter le jeu sans confirmation sur ce compte ? (une confirmation MetaMask)")) closeSession().catch(() => {});
+};
 $("withdrawBtn").onclick = () => withdrawFees().catch(() => {});
 $("historyMore").onclick = () => { state.historyShown += HISTORY_PAGE; renderLists(); };
 $("guideClose").onclick = () => { localStorage.setItem("arene-guide-masque", "1"); renderGuide(); };
