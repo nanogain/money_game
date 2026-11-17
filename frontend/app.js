@@ -176,9 +176,26 @@ function secretKey(id, round) {
   return `pfc:${APP_CONFIG.arena}:${id}:${round}:${state.account}`.toLowerCase();
 }
 
+// Empreinte calculée dans le navigateur : le coup et le sel ne sont jamais envoyés au nœud
+// RPC avant la révélation. Doit rester identique à pfcHash() du contrat.
+let hashBindsContract = null;
+async function localPfcHash(id, round, player, move, salt) {
+  if (hashBindsContract === null) {
+    // Les contrats déployés après la revue de sécurité exposent MIN_STAKE et lient l'empreinte
+    // à l'adresse du contrat et au réseau ; les anciens non.
+    hashBindsContract = await state.arena.MIN_STAKE().then(() => true, () => false);
+  }
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const data = hashBindsContract
+    ? coder.encode(["address", "uint256", "uint256", "uint8", "address", "uint8", "bytes32"],
+        [await state.arena.getAddress(), CHAIN_ID, id, round, player, move, salt])
+    : coder.encode(["uint256", "uint8", "address", "uint8", "bytes32"], [id, round, player, move, salt]);
+  return ethers.keccak256(data);
+}
+
 async function pfcCommit(id, round, move) {
   const salt = ethers.hexlify(ethers.randomBytes(32));
-  const hash = await state.arena.pfcHash(id, round, state.account, move, salt);
+  const hash = await localPfcHash(id, round, state.account, move, salt);
   // Le coup et le sel restent dans ce navigateur jusqu'à la révélation.
   localStorage.setItem(secretKey(id, round), JSON.stringify({ move, salt }));
   await tx(`Coup caché (${PFC_NAMES[move]})`, () => state.arena.commitPfc(id, hash));
