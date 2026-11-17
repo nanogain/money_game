@@ -25,7 +25,7 @@ Règles communes :
 ## Contenu
 
 - `contracts/MiniJeuxArena.sol` : le contrat (annonces, mises, jeux, frais, délais).
-- `contracts/MockUSDC.sol` : faux USDC pour les tests (avec un robinet gratuit).
+- `contracts/MockUSDC.sol` : jeton de test ARENETEST qui remplace l’USDC sur le réseau de test (avec un robinet gratuit). Il ne s’appelle pas « USDC » exprès : MetaMask signale comme trompeur un jeton qui en imite un autre.
 - `test/arena.test.js` : 20 tests automatiques.
 - `scripts/deploy.js` : déploiement en ligne de commande + mise à jour de `frontend/config.js`.
 - `scripts/export-frontend.js` : copie les ABI/bytecodes compilés dans `frontend/contracts.js`.
