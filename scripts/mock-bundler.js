@@ -28,7 +28,17 @@ const pack = (op) => ({
 });
 const receipts = {};
 
+// Comme le vrai paymaster (Coinbase CDP) : quantités JSON-RPC strictes (« 0x14a34 », pas « 0x014a34 »).
+const QUANTITY = /^0x(0|[1-9a-f][0-9a-f]*)$/;
+const QTY_FIELDS = ["nonce", "callGasLimit", "verificationGasLimit", "preVerificationGas", "maxFeePerGas", "maxPriorityFeePerGas", "paymasterVerificationGasLimit", "paymasterPostOpGasLimit"];
+function checkArgs(method, params) {
+  const bad = (m) => { const e = new Error(`invalid argument - ${m}`); e.code = -32602; throw e; };
+  if (method.startsWith("pm_") && (!QUANTITY.test(params[2]) || BigInt(params[2]) !== 31337n)) bad("invalid chain id in request");
+  for (const k of QTY_FIELDS) if (params[0]?.[k] !== undefined && !QUANTITY.test(params[0][k])) bad(`invalid ${k}`);
+}
+
 async function handle(method, params) {
+  checkArgs(method, params);
   const pm = { paymaster: cfg.localPaymaster, paymasterData: "0x", paymasterVerificationGasLimit: "0x30000", paymasterPostOpGasLimit: "0x0" };
   switch (method) {
     case "pm_getPaymasterStubData": return { ...pm, isFinal: false };
@@ -66,7 +76,7 @@ http.createServer((req, res) => {
       res.end(JSON.stringify({ jsonrpc: "2.0", id, result: await handle(method, params) }));
     } catch (e) {
       console.error(method, e.shortMessage || e.message);
-      res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: e.shortMessage || e.message } }));
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: typeof e.code === "number" ? e.code : -32000, message: e.shortMessage || e.message } }));
     }
   });
 }).listen(8547, () => console.log("Faux bundler/paymaster sur http://127.0.0.1:8547"));
