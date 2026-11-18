@@ -11,7 +11,7 @@ window.NETWORKS = {
     "moveTimeout": 600,
     "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     "accountFactory": "0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17",
-    "paymasterUrl": ""
+    "paymasterUrl": "https://api.developer.coinbase.com/rpc/v1/base-sepolia/IaODr1KXEfob5yccCgRPKLXPNaBacGAu"
   },
   "31337": {
     "name": "Blockchain locale (Hardhat)",
