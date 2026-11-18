@@ -5,10 +5,13 @@ window.NETWORKS = {
     "name": "Base Sepolia (réseau de test)",
     "rpc": "https://sepolia.base.org",
     "explorer": "https://sepolia.basescan.org",
-    "arena": "0xCd0d44D59feb129B3E8A832B3Cc9d41990811288",
-    "usdc": "0x64E6cD88fA2e5EAC0Dd57932A1CeAbF95F590186",
+    "arena": "0xde99AAa6e81708322325E65A7FA8C82b66C17D18",
+    "usdc": "0xe977639ADA11121eD56B699AdbE1067626a38dF3",
     "mockUsdc": true,
-    "moveTimeout": 600
+    "moveTimeout": 600,
+    "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "accountFactory": "0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17",
+    "paymasterUrl": ""
   },
   "31337": {
     "name": "Blockchain locale (Hardhat)",
