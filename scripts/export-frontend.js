@@ -8,12 +8,17 @@ async function exportFrontend() {
   await hre.run("compile", { quiet: true });
   const arena = await hre.artifacts.readArtifact("MiniJeuxArena");
   const usdc = await hre.artifacts.readArtifact("MockUSDC");
+  const factory = await hre.artifacts.readArtifact("SimpleAccountFactory");
+  const account = await hre.artifacts.readArtifact("SimpleAccount");
   const out =
     "// Généré par scripts/export-frontend.js — ne pas modifier à la main.\n" +
     `window.ARENA_ABI = ${JSON.stringify(arena.abi)};\n` +
     `window.USDC_ABI = ${JSON.stringify(usdc.abi)};\n` +
     `window.ARENA_BYTECODE = "${arena.bytecode}";\n` +
-    `window.USDC_BYTECODE = "${usdc.bytecode}";\n`;
+    `window.USDC_BYTECODE = "${usdc.bytecode}";\n` +
+    `window.ACCOUNT_FACTORY_ABI = ${JSON.stringify(factory.abi)};\n` +
+    `window.ACCOUNT_FACTORY_BYTECODE = "${factory.bytecode}";\n` +
+    `window.SIMPLE_ACCOUNT_ABI = ${JSON.stringify(account.abi.filter((x) => x.type === "function" && ["execute", "executeBatch", "owner"].includes(x.name)))};\n`;
   fs.writeFileSync(path.join(__dirname, "..", "frontend", "contracts.js"), out);
   console.log("frontend/contracts.js écrit.");
 }

@@ -77,9 +77,9 @@ describe("MiniJeuxArena", function () {
       await arena.connect(alice).play(id, 4);
       await expect(arena.connect(bob).play(id, 2)).to.emit(arena, "MatchFinished").withArgs(id, bob.address, POT_NET, 400_000n);
       expect(await bal(bob)).to.equal(before + POT_NET);
-      expect(await arena.feesAccrued()).to.equal(400_000n);
-      await arena.withdrawFees(owner.address);
+      // les 2 % arrivent automatiquement sur l'adresse de réception (le propriétaire par défaut)
       expect(await usdc.balanceOf(owner.address)).to.equal(400_000n);
+      expect(await arena.feesAccrued()).to.equal(0n);
     });
 
     it("refuse les coups hors tour, case prise ou hors plateau", async () => {

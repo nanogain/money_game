@@ -4,16 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Arène — déploiement des contrats</title>
-  <link rel="stylesheet" href="style.css?v=20261117c" />
+  <link rel="stylesheet" href="style.css?v=20261117e" />
 </head>
 <body>
   <header><h1>Arène <span class="sub">déploiement des contrats</span></h1></header>
   <main>
     <section class="card">
       <h2>Déployer sur <span id="netName"></span></h2>
-      <p>Cette page installe les deux contrats de la plateforme depuis votre MetaMask : un jeton de test gratuit (ARENETEST, qui remplace l’USDC sur le réseau de test) et le contrat des mini-jeux.
-         Votre compte en devient le propriétaire : c'est lui qui pourra retirer les 2 % de frais. Aucune clé n'est partagée.</p>
-      <p class="muted small">Il faut un peu d'ETH de test sur votre compte (environ 0,0005 ETH suffisent). MetaMask vous demandera de confirmer 2 transactions.</p>
+      <p>Cette page installe les trois contrats de la plateforme depuis votre MetaMask : un jeton de test gratuit (ARENETEST, qui remplace l’USDC sur le réseau de test) le contrat des mini-jeux et la fabrique de « comptes de jeu » qui permet de jouer sans ETH.
+         Votre compte en devient le propriétaire : c'est lui qui reçoit automatiquement les 2 % de frais à chaque fin de partie (adresse modifiable ensuite sur le site). Aucune clé n'est partagée.</p>
+      <p class="muted small">Il faut un peu d'ETH de test sur votre compte (environ 0,001 ETH suffisent). MetaMask vous demandera de confirmer 3 transactions.</p>
       <div class="row"><button id="deployBtn">Connecter MetaMask et déployer</button></div>
       <pre id="log" class="small" style="white-space: pre-wrap"></pre>
       <div id="done" hidden>
@@ -25,11 +25,11 @@
     </section>
   </main>
   <script src="ethers.umd.min.js"></script>
-  <script src="contracts.js?v=20261117c"></script>
-  <script src="config.js?v=20261117c"></script>
-  <script src="network.js?v=20261117c"></script>
+  <script src="contracts.js?v=20261117e"></script>
+  <script src="config.js?v=20261117e"></script>
+  <script src="network.js?v=20261117e"></script>
   <script>
-    /* global ethers, NETWORKS, ARENA_ABI, USDC_ABI, ARENA_BYTECODE, USDC_BYTECODE, switchNetwork */
+    /* global ethers, NETWORKS, ARENA_ABI, USDC_ABI, ARENA_BYTECODE, USDC_BYTECODE, ACCOUNT_FACTORY_ABI, ACCOUNT_FACTORY_BYTECODE, switchNetwork */
     const IS_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
     const CHAIN_ID = Number(new URLSearchParams(location.search).get("chain") || (IS_LOCAL ? 31337 : 84532));
     const cfg = { ...NETWORKS[CHAIN_ID], chainId: CHAIN_ID };
@@ -50,21 +50,28 @@
         log(`Compte : ${me} (${ethers.formatEther(eth)} ETH)`);
         if (eth === 0n) throw new Error("Ce compte n'a pas d'ETH de test. Récupérez-en sur un robinet (faucet) puis réessayez.");
 
-        log("1/2 Déploiement du jeton de test… confirmez dans MetaMask.");
+        log("1/3 Déploiement du jeton de test… confirmez dans MetaMask.");
         const usdc = await new ethers.ContractFactory(USDC_ABI, USDC_BYTECODE, signer).deploy();
         await usdc.waitForDeployment();
         const usdcAddr = await usdc.getAddress();
         log(`    Jeton de test : ${usdcAddr}`);
 
-        log("2/2 Déploiement du contrat des mini-jeux… confirmez dans MetaMask.");
+        log("2/3 Déploiement du contrat des mini-jeux… confirmez dans MetaMask.");
         const arena = await new ethers.ContractFactory(ARENA_ABI, ARENA_BYTECODE, signer).deploy(usdcAddr, cfg.moveTimeout || 600);
         await arena.waitForDeployment();
         const arenaAddr = await arena.getAddress();
         log(`    Mini-jeux : ${arenaAddr}`);
 
-        const saved = { arena: arenaAddr, usdc: usdcAddr, mockUsdc: true, moveTimeout: cfg.moveTimeout || 600 };
+        const entryPoint = cfg.entryPoint || "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
+        log("3/3 Déploiement de la fabrique de comptes de jeu… confirmez dans MetaMask.");
+        const factory = await new ethers.ContractFactory(ACCOUNT_FACTORY_ABI, ACCOUNT_FACTORY_BYTECODE, signer).deploy(entryPoint);
+        await factory.waitForDeployment();
+        const factoryAddr = await factory.getAddress();
+        log(`    Fabrique : ${factoryAddr}`);
+
+        const saved = { arena: arenaAddr, usdc: usdcAddr, mockUsdc: true, moveTimeout: cfg.moveTimeout || 600, entryPoint, accountFactory: factoryAddr };
         localStorage.setItem(`arene-deploiement-${CHAIN_ID}`, JSON.stringify(saved));
-        const summary = `Contrats déployés sur ${cfg.name} (chainId ${CHAIN_ID}) :\narena = ${arenaAddr}\nusdc = ${usdcAddr}\npropriétaire = ${me}`;
+        const summary = `Contrats déployés sur ${cfg.name} (chainId ${CHAIN_ID}) :\narena = ${arenaAddr}\nusdc = ${usdcAddr}\nfabrique = ${factoryAddr}\npropriétaire = ${me}`;
         document.getElementById("summary").textContent = summary;
         document.getElementById("done").hidden = false;
         document.getElementById("copyBtn").onclick = () => navigator.clipboard.writeText(summary);
