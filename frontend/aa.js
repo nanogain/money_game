@@ -17,13 +17,20 @@ const pad16 = (v) => ethers.zeroPadValue(ethers.toBeHex(BigInt(v || 0)), 16);
 
 let rpcId = 0;
 async function bundlerCall(method, params) {
-  const res = await fetch(APP_CONFIG.paymasterUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
-  });
-  const j = await res.json();
-  if (j.error) throw new Error(`Paymaster : ${j.error.message || JSON.stringify(j.error)}`);
+  // Le nom de l'étape figure dans le message, pour savoir précisément ce que le paymaster refuse.
+  let res;
+  try {
+    res = await fetch(APP_CONFIG.paymasterUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+    });
+  } catch (e) {
+    throw new Error(`Paymaster injoignable (${method}) : ${e.message}`);
+  }
+  const j = await res.json().catch(() => null);
+  if (!j) throw new Error(`Paymaster (${method}) : réponse HTTP ${res.status}`);
+  if (j.error) throw new Error(`Paymaster (${method}) : ${j.error.message || JSON.stringify(j.error)}${j.error.code ? ` [${j.error.code}]` : ""}`);
   return j.result;
 }
 

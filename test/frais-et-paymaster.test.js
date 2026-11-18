@@ -8,15 +8,15 @@ const STAKE = 10_000_000n;
 const FEE = (STAKE * 2n * 200n) / 10_000n;
 const WEEK = 7 * 24 * 3600;
 
-async function sessionSig(arena, player, key, budget, duration, deadline) {
+// Une seule signature : un permit du budget au profit du contrat de prélèvement de la session.
+async function sessionPermit(arena, usdc, player, key, budget, duration, deadline) {
   const { chainId } = await ethers.provider.getNetwork();
-  const domain = { name: "Arene", version: "1", chainId, verifyingContract: await arena.getAddress() };
-  const types = { Session: [
-    { name: "player", type: "address" }, { name: "key", type: "address" }, { name: "budget", type: "uint256" },
-    { name: "duration", type: "uint64" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" },
-  ] };
-  const nonce = await arena.sessionNonces(player.address);
-  return player.signTypedData(domain, types, { player: player.address, key, budget, duration, nonce, deadline });
+  const spender = await arena.sessionSpender(player.address, key, duration);
+  const sig = ethers.Signature.from(await player.signTypedData(
+    { name: "Jeton de test Arene", version: "1", chainId, verifyingContract: await usdc.getAddress() },
+    { Permit: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
+    { owner: player.address, spender, value: budget, nonce: await usdc.nonces(player.address), deadline }));
+  return [player.address, key, budget, duration, deadline, sig.v, sig.r, sig.s];
 }
 
 describe("Frais automatiques", function () {
@@ -62,34 +62,54 @@ describe("Frais automatiques", function () {
   });
 });
 
-describe("Session signée (sans ETH pour le joueur)", function () {
+describe("Session ouverte par une seule signature (sans ETH pour le joueur)", function () {
   let usdc, arena, alice, bob, relayer;
   beforeEach(async () => {
     [, alice, bob, relayer] = await ethers.getSigners();
     usdc = await (await ethers.getContractFactory("MockUSDC")).deploy();
     arena = await (await ethers.getContractFactory("MiniJeuxArena")).deploy(await usdc.getAddress(), 600);
+    for (const s of [alice, bob]) await usdc.faucetTo(s.address, 1000_000_000n);
   });
 
   it("n'importe qui peut transmettre la signature ; elle ne sert qu'une fois", async () => {
     const key = ethers.Wallet.createRandom().address;
-    const deadline = (await time.latest()) + 3600;
-    const sig = await sessionSig(arena, alice, key, STAKE, WEEK, deadline);
-    await arena.connect(relayer).openSessionBySig(alice.address, key, STAKE, WEEK, deadline, sig);
-    expect((await arena.sessions(alice.address)).key).to.equal(key);
-    await expect(arena.connect(relayer).openSessionBySig(alice.address, key, STAKE, WEEK, deadline, sig))
-      .to.be.revertedWithCustomError(arena, "NotPlayer");
+    const args = await sessionPermit(arena, usdc, alice, key, STAKE * 2n, WEEK, (await time.latest()) + 3600);
+    await arena.connect(relayer).openSessionByPermit(...args);
+    const s = await arena.sessions(alice.address);
+    expect(s.key).to.equal(key);
+    expect(s.budget).to.equal(STAKE * 2n);
+    await expect(arena.connect(relayer).openSessionByPermit(...args)).to.be.revertedWithCustomError(arena, "NotPlayer");
   });
 
-  it("refuse une signature d'un autre compte, modifiée ou expirée", async () => {
+  it("refuse une signature d'un autre compte, une clé, un budget ou une durée modifiés", async () => {
     const key = ethers.Wallet.createRandom().address;
     const deadline = (await time.latest()) + 3600;
-    const sig = await sessionSig(arena, bob, key, STAKE, WEEK, deadline);
-    await expect(arena.openSessionBySig(alice.address, key, STAKE, WEEK, deadline, sig)).to.be.revertedWithCustomError(arena, "NotPlayer");
-    const good = await sessionSig(arena, alice, key, STAKE, WEEK, deadline);
-    await expect(arena.openSessionBySig(alice.address, key, STAKE * 10n, WEEK, deadline, good)).to.be.revertedWithCustomError(arena, "NotPlayer");
-    const old = await sessionSig(arena, alice, key, STAKE, WEEK, (await time.latest()) + 10);
-    await time.increase(60);
-    await expect(arena.openSessionBySig(alice.address, key, STAKE, WEEK, (await time.latest()) - 50, old)).to.be.revertedWithCustomError(arena, "SessionExpired");
+    const byBob = await sessionPermit(arena, usdc, bob, key, STAKE, WEEK, deadline);
+    await expect(arena.openSessionByPermit(alice.address, ...byBob.slice(1))).to.be.revertedWithCustomError(arena, "NotPlayer");
+    const good = await sessionPermit(arena, usdc, alice, key, STAKE, WEEK, deadline);
+    const other = ethers.Wallet.createRandom().address;
+    await expect(arena.openSessionByPermit(good[0], other, ...good.slice(2))).to.be.revertedWithCustomError(arena, "NotPlayer");
+    await expect(arena.openSessionByPermit(good[0], key, STAKE * 10n, ...good.slice(3))).to.be.revertedWithCustomError(arena, "NotPlayer");
+    await expect(arena.openSessionByPermit(good[0], key, STAKE, WEEK * 2, ...good.slice(4))).to.be.revertedWithCustomError(arena, "NotPlayer");
+    await time.increase(7200);
+    await expect(arena.openSessionByPermit(...good)).to.be.revertedWithCustomError(arena, "NotPlayer"); // signature expirée
+  });
+
+  it("la clé ne peut prélever que des mises, dans la limite du budget, et plus rien après fermeture", async () => {
+    const keyW = ethers.Wallet.createRandom().connect(ethers.provider);
+    await relayer.sendTransaction({ to: keyW.address, value: ethers.parseEther("1") });
+    await arena.openSessionByPermit(...await sessionPermit(arena, usdc, alice, keyW.address, STAKE, WEEK, (await time.latest()) + 3600));
+    const spender = (await arena.sessions(alice.address)).spender;
+    // le contrat de prélèvement n'obéit qu'à l'arène
+    const sp = await ethers.getContractAt("SessionSpender", spender);
+    await expect(sp.connect(keyW).pull(await usdc.getAddress(), alice.address, 1n)).to.be.reverted;
+    await arena.connect(keyW).createMatchAsSession(MORPION, STAKE);
+    expect(await usdc.balanceOf(alice.address)).to.equal(1000_000_000n - STAKE);
+    await expect(arena.connect(keyW).createMatchAsSession(MORPION, STAKE)).to.be.revertedWithCustomError(arena, "BudgetExceeded");
+    await arena.connect(alice).closeSession();
+    await expect(arena.connect(keyW).createMatchAsSession(MORPION, 1_000_000n)).to.be.revertedWithCustomError(arena, "NotPlayer");
+    // une ancienne signature ne rouvre pas la session (numéro de session consommé)
+    expect(await arena.sessionNonces(alice.address)).to.equal(1n);
   });
 });
 
@@ -140,30 +160,20 @@ describe("Comptes de jeu ERC-4337 + paymaster", function () {
     expect(ev.args.success, "UserOperation réussie").to.equal(true);
   }
 
-  it("le joueur signe deux fois (permis + session) puis joue sans jamais avoir d'ETH", async () => {
+  it("le joueur signe UNE fois puis joue sans jamais avoir d'ETH", async () => {
     const key = await accountAddr();
-    const { chainId } = await ethers.provider.getNetwork();
-    const deadline = (await time.latest()) + 3600;
-    // 1) permis du jeton (signature, gratuite)
-    const permitSig = ethers.Signature.from(await player.signTypedData(
-      { name: "Jeton de test Arene", version: "1", chainId, verifyingContract: await usdc.getAddress() },
-      { Permit: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
-      { owner: player.address, spender: await arena.getAddress(), value: ethers.MaxUint256, nonce: await usdc.nonces(player.address), deadline }));
-    // 2) session (signature, gratuite)
-    const sig = await sessionSig(arena, player, key, 50_000_000n, WEEK, deadline);
-    // 3) la clé envoie les deux d'un coup, frais payés par le paymaster
-    await sendOp([
-      { to: await usdc.getAddress(), data: usdc.interface.encodeFunctionData("permit", [player.address, await arena.getAddress(), ethers.MaxUint256, deadline, permitSig.v, permitSig.r, permitSig.s]) },
-      { to: await arena.getAddress(), data: arena.interface.encodeFunctionData("openSessionBySig", [player.address, key, 50_000_000n, WEEK, deadline, sig]) },
-    ]);
+    // 1) une seule signature, gratuite : le permit du budget de la session
+    const args = await sessionPermit(arena, usdc, player, key, 50_000_000n, WEEK, (await time.latest()) + 3600);
+    // 2) le compte de jeu l'envoie, frais payés par le paymaster
+    await sendOp([{ to: await arena.getAddress(), data: arena.interface.encodeFunctionData("openSessionByPermit", args) }]);
     expect((await arena.sessions(player.address)).key).to.equal(key);
-    // 4) publier une annonce : mise prise sur le wallet du joueur
+    // 3) publier une annonce : mise prise sur le wallet du joueur
     await sendOp([{ to: await arena.getAddress(), data: arena.interface.encodeFunctionData("createMatchAsSession", [MORPION, STAKE]) }]);
     const m = await arena.getMatch(1);
     expect(m.creator).to.equal(player.address);
     expect(await usdc.balanceOf(player.address)).to.equal(1000_000_000n - STAKE);
     expect(await ethers.provider.getBalance(player.address)).to.equal(0n);
-    // 5) jetons de test sans confirmation
+    // 4) jetons de test sans confirmation
     await sendOp([{ to: await usdc.getAddress(), data: usdc.interface.encodeFunctionData("faucetTo", [player.address, 1_000_000n]) }]);
     expect(await usdc.balanceOf(player.address)).to.equal(1000_000_000n - STAKE + 1_000_000n);
   });

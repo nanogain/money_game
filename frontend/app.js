@@ -280,9 +280,14 @@ async function loadSession() {
   // Mode « eoa » : la clé paie ses frais, il lui faut de quoi payer la transaction la plus chère.
   const gasOk = mode === "aa" ? true
     : bal === null ? (prev?.gasOk ?? true) : gasPrice === null ? bal > 0n : bal >= gasPrice * 2n * 400000n;
+  // Session ouverte par une signature : les mises passent par son contrat de prélèvement.
+  const spender = on && s.spender && s.spender !== ZERO ? s.spender : null;
+  const spenderAllowance = spender ? await state.usdc.allowance(account, spender).catch(() => prev?.allowance ?? 0n) : null;
   state.session = {
     mode,
     acct,
+    spender,
+    allowance: spenderAllowance,
     on,
     expiresAt,
     budget: on ? s.budget : 0n,
@@ -300,15 +305,21 @@ function sessionWhyNot(stake = 0n) {
   if (!s.gasOk) return "La session n'a plus d'ETH pour payer les frais : renouvelez-la (carte ⚡).";
   if (stake > 0n && !s.canStake) return "La session est terminée : renouvelez-la (carte ⚡).";
   if (stake > 0n && s.budget < BigInt(stake)) return `Budget de session insuffisant (${fmt(s.budget)} USDC restants) : renouvelez-la (carte ⚡).`;
-  if (stake > 0n && (state.allowance ?? 0n) < BigInt(stake)) return "L'autorisation du jeton manque : renouvelez la session (carte ⚡).";
+  if (stake > 0n && stakeAllowance() < BigInt(stake)) return "L'autorisation du jeton manque : renouvelez la session (carte ⚡).";
   return "";
+}
+
+// Montant que la session peut encore prélever sur le wallet (autorisation du jeton).
+function stakeAllowance() {
+  const s = state.session;
+  return (s?.spender ? s.allowance : state.allowance) ?? 0n;
 }
 
 // La clé peut-elle agir maintenant ? (stake = mise à engager, 0 pour un coup)
 function sessionReady(stake = 0n) {
   const s = state.session;
   if (!s || !s.on || !s.gasOk) return false;
-  if (stake > 0n) return s.canStake && s.budget >= BigInt(stake) && (state.allowance ?? 0n) >= BigInt(stake);
+  if (stake > 0n) return s.canStake && s.budget >= BigInt(stake) && stakeAllowance() >= BigInt(stake);
   return true;
 }
 
@@ -327,12 +338,13 @@ async function activateSession() {
   try { budget = ethers.parseUnits(budgetTxt, DECIMALS); } catch { return notify("Budget invalide.", true); }
   localStorage.setItem(SESSION_PREFS, JSON.stringify({ budget: budgetTxt, days }));
   if (aaEnabled()) {
+    // Jamais de transaction payante en secours : en cas d'échec, on affiche la raison.
     try {
       return await activateSessionGasless(budget, days);
     } catch (e) {
       if (e?.code === "ACTION_REJECTED" || e?.code === 4001) return notify("Signature refusée dans le wallet.", true);
       console.warn(e);
-      notify(`Activation gratuite impossible (${errMsg(e)}). On passe par une transaction classique.`, true);
+      return notify(`Activation impossible : ${errMsg(e)}`, true);
     }
   }
   const allowance = await state.usdc.allowance(state.account, APP_CONFIG.arena);
@@ -354,39 +366,29 @@ async function activateSession() {
   await tx("Activation du jeu sans confirmation", () => state.arena.openSession(w.address, budget, days * 86400, { value }));
 }
 
-// Activation sans ETH : le joueur SIGNE (gratuit) l'ouverture de session, et la première fois
-// l'autorisation du jeton (permit). Le compte de jeu envoie le tout ; la plateforme paie les frais.
+// Activation sans ETH, en UNE signature gratuite : le joueur autorise (permit) le contrat de
+// prélèvement propre à cette session à prendre au plus `budget` en mises. Ce contrat ne sait que
+// verser des mises à l'arène, et son adresse dépend de la clé et de la durée : la signature ne
+// peut servir à rien d'autre. Le compte de jeu envoie le tout ; la plateforme paie les frais.
 async function activateSessionGasless(budget, days) {
   const w = sessionWallet();
   const provider = state.provider || state.rpc;
   const acct = await gameAccountAddress(provider, w.address);
   const deadline = nowSec() + 3600;
-  const calls = [];
-  const allowance = await state.usdc.allowance(state.account, APP_CONFIG.arena);
-  if (allowance < budget) {
-    notify("Première fois : signez l'autorisation de prendre vos mises (gratuit, aucune transaction).");
-    const [name, nonce, version] = await Promise.all([
-      state.usdc.name(),
-      state.usdc.nonces(state.account),
-      APP_CONFIG.tokenPermitVersion || state.usdc.eip712Domain().then((d) => d.version).catch(() => "1"),
-    ]);
-    const sig = ethers.Signature.from(await state.signer.signTypedData(
-      { name, version, chainId: APP_CONFIG.chainId, verifyingContract: APP_CONFIG.usdc },
-      { Permit: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
-      { owner: state.account, spender: APP_CONFIG.arena, value: ethers.MaxUint256, nonce, deadline }));
-    calls.push({ to: APP_CONFIG.usdc, data: state.usdc.interface.encodeFunctionData("permit", [state.account, APP_CONFIG.arena, ethers.MaxUint256, deadline, sig.v, sig.r, sig.s]) });
-  }
-  notify("Signez l'ouverture de la session de jeu (gratuit, aucune transaction).");
   const duration = days * 86400;
-  const sessionNonce = await state.readArena.sessionNonces(state.account);
-  const sig = await state.signer.signTypedData(
-    { name: "Arene", version: "1", chainId: APP_CONFIG.chainId, verifyingContract: APP_CONFIG.arena },
-    { Session: [
-      { name: "player", type: "address" }, { name: "key", type: "address" }, { name: "budget", type: "uint256" },
-      { name: "duration", type: "uint64" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" },
-    ] },
-    { player: state.account, key: acct, budget, duration, nonce: sessionNonce, deadline });
-  calls.push({ to: APP_CONFIG.arena, data: state.arena.interface.encodeFunctionData("openSessionBySig", [state.account, acct, budget, duration, deadline, sig]) });
+  const [spender, name, nonce, version] = await Promise.all([
+    state.readArena.sessionSpender(state.account, acct, duration),
+    state.usdc.name(),
+    state.usdc.nonces(state.account),
+    APP_CONFIG.tokenPermitVersion || state.usdc.eip712Domain().then((d) => d.version).catch(() => "1"),
+  ]);
+  notify(`Signez pour activer le jeu sans confirmation (gratuit, aucune transaction) : budget de mises ${fmt(budget)} USDC pendant ${days} jour${days > 1 ? "s" : ""}.`);
+  const sig = ethers.Signature.from(await state.signer.signTypedData(
+    { name, version, chainId: APP_CONFIG.chainId, verifyingContract: APP_CONFIG.usdc },
+    { Permit: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
+    { owner: state.account, spender, value: budget, nonce, deadline }));
+  const calls = [{ to: APP_CONFIG.arena, data: state.arena.interface.encodeFunctionData("openSessionByPermit",
+    [state.account, acct, budget, duration, deadline, sig.v, sig.r, sig.s]) }];
   let failed = null;
   await tx("Activation du jeu sans confirmation", () => sendUserOp(provider, w, calls), { session: true }).catch((e) => { failed = e; });
   if (failed) throw failed;
@@ -411,13 +413,7 @@ async function gameTx(id, label, method, ...args) {
     const why = sessionWhyNot();
     return tx(label + (why ? ` (${why})` : ""), () => state.arena[method](...args));
   }
-  try {
-    return await tx(label, () => sessionCall(state.arena, method, ...args), { session: true });
-  } catch (e) {
-    // Paymaster indisponible (quota, panne) : on retente par le wallet plutôt que de bloquer la partie.
-    if (!String(e?.message).includes("Paymaster")) throw e;
-    return tx(`${label} (frais non pris en charge, confirmation nécessaire)`, () => state.arena[method](...args));
-  }
+  return tx(label, () => sessionCall(state.arena, method, ...args), { session: true });
 }
 
 function renderSession() {

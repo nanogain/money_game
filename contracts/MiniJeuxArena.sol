@@ -6,14 +6,26 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 /// @title MiniJeuxArena
 /// @notice Mini-jeux à deux joueurs avec mise en USDC. Toute la logique des jeux est
 ///         dans le contrat : aucun oracle ni serveur ne décide du vainqueur.
 ///         Jeux : Pierre-Feuille-Ciseaux (coups cachés puis révélés), Morpion, Puissance 4.
-contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
+/// @notice Petit contrat propre à une session : le joueur l'autorise (permit) à dépenser son budget,
+///         et il ne sait faire qu'une chose, sur ordre de l'arène : verser une mise À l'arène.
+contract SessionSpender {
+    using SafeERC20 for IERC20;
+    address private immutable arena = msg.sender;
+
+    function pull(IERC20 token, address from, uint256 amount) external {
+        if (msg.sender != arena) revert();
+        token.safeTransferFrom(from, arena, amount);
+    }
+}
+
+contract MiniJeuxArena is ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     enum GameType { PierreFeuilleCiseaux, Morpion, Puissance4, DuelDeDes, BatailleNavale }
@@ -108,14 +120,14 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
         address key;
         uint64 expiresAt;  // après cette date, la clé ne peut plus engager de nouvelles mises
         uint256 budget;    // total des mises que la clé peut encore engager
+        address spender;   // session ouverte par permit : contrat qui prélève les mises (sinon 0)
     }
     mapping(address => Session) public sessions;   // joueur => session
     mapping(address => address) public sessionOwner; // clé => joueur
     uint64 public constant MAX_SESSION = 30 days;
-    /// @notice Session autorisée par une signature du joueur (gratuite, sans transaction de sa part).
-    bytes32 public constant SESSION_TYPEHASH =
-        keccak256("Session(address player,address key,uint256 budget,uint64 duration,uint256 nonce,uint256 deadline)");
+    /// @notice Sessions ouvertes par une seule signature (permit) du joueur : numéro de la prochaine.
     mapping(address => uint256) public sessionNonces;
+    address public immutable spenderImplementation;
 
     event MatchCreated(uint256 indexed id, address indexed creator, GameType game, uint256 stake);
     event MatchJoined(uint256 indexed id, address indexed opponent);
@@ -149,7 +161,8 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
     error SessionExpired();
     error BudgetExceeded();
 
-    constructor(IERC20 _token, uint256 _moveTimeout) Ownable(msg.sender) EIP712("Arene", "1") {
+    constructor(IERC20 _token, uint256 _moveTimeout) Ownable(msg.sender) {
+        spenderImplementation = address(new SessionSpender());
         token = _token;
         moveTimeout = _moveTimeout;
         feeRecipient = msg.sender;
@@ -159,16 +172,17 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
 
     /// @notice Publier une annonce : choisit le jeu et dépose sa mise.
     function createMatch(GameType game, uint256 stake) external nonReentrant returns (uint256 id) {
-        id = _create(msg.sender, game, stake);
+        id = _create(msg.sender, game, stake, address(0));
     }
 
     /// @notice Publier une annonce depuis la clé de session : la mise est prélevée sur le wallet
     ///         du joueur (dans la limite du budget de la session), sans confirmation.
     function createMatchAsSession(GameType game, uint256 stake) external nonReentrant returns (uint256 id) {
-        id = _create(_spend(stake), game, stake);
+        (address player, address spender) = _spend(stake);
+        id = _create(player, game, stake, spender);
     }
 
-    function _create(address player, GameType game, uint256 stake) internal returns (uint256 id) {
+    function _create(address player, GameType game, uint256 stake, address spender) internal returns (uint256 id) {
         if (stake < MIN_STAKE) revert StakeTooLow();
         id = ++matchCount;
         Match storage m = matches[id];
@@ -177,7 +191,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
         m.creator = player;
         m.stake = stake;
         m.lastActionAt = uint64(block.timestamp);
-        token.safeTransferFrom(player, address(this), stake);
+        _collect(player, stake, spender);
         emit MatchCreated(id, player, game, stake);
     }
 
@@ -193,15 +207,16 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
 
     /// @notice Accepter une annonce : dépose la même mise. L'accepteur joue en premier.
     function joinMatch(uint256 id) external nonReentrant {
-        _join(msg.sender, id);
+        _join(msg.sender, id, address(0));
     }
 
     /// @notice Accepter une annonce depuis la clé de session (mise prélevée sur le wallet du joueur).
     function joinMatchAsSession(uint256 id) external nonReentrant {
-        _join(_spend(matches[id].stake), id);
+        (address player, address spender) = _spend(matches[id].stake);
+        _join(player, id, spender);
     }
 
-    function _join(address player, uint256 id) internal {
+    function _join(address player, uint256 id, address spender) internal {
         if (id == 0 || id > matchCount) revert InvalidState(); // annonce inexistante
         Match storage m = matches[id];
         if (m.status != Status.Open) revert InvalidState();
@@ -210,7 +225,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
         m.status = Status.Active;
         m.turn = player;
         m.lastActionAt = uint64(block.timestamp);
-        token.safeTransferFrom(player, address(this), m.stake);
+        _collect(player, m.stake, spender);
         emit MatchJoined(id, player);
     }
 
@@ -227,24 +242,41 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
         }
     }
 
-    /// @notice Ouvrir une session à partir d'une signature EIP-712 du joueur. N'importe qui peut
-    ///         l'envoyer (en pratique la clé elle-même, dont les frais sont payés par le paymaster
-    ///         de la plateforme) : le joueur n'a besoin d'aucun ETH. Chaque signature ne sert qu'une
-    ///         fois (nonce) et expire à `deadline`.
-    function openSessionBySig(
+    /// @notice Adresse du contrat de prélèvement de la prochaine session de `player` avec `key`.
+    ///         C'est à elle que le joueur donne son autorisation (permit) : elle dépend de la clé,
+    ///         de la durée et du numéro de session, donc une signature ne vaut que pour cette session.
+    function sessionSpender(address player, address key, uint64 duration) public view returns (address) {
+        return Clones.predictDeterministicAddress(spenderImplementation, _spenderSalt(player, key, duration), address(this));
+    }
+
+    function _spenderSalt(address player, address key, uint64 duration) internal view returns (bytes32) {
+        return keccak256(abi.encode(player, key, duration, sessionNonces[player]));
+    }
+
+    /// @notice Ouvrir une session avec UNE seule signature du joueur : un permit (EIP-2612) du
+    ///         budget au profit de sessionSpender(player, key, duration). N'importe qui peut
+    ///         l'envoyer (en pratique le compte de jeu, dont les frais sont payés par le paymaster) :
+    ///         le joueur n'a besoin d'aucun ETH. Changer la clé, la durée ou le budget invalide la
+    ///         signature ; chaque signature ne sert qu'une fois.
+    function openSessionByPermit(
         address player,
         address key,
         uint256 budget,
         uint64 duration,
         uint256 deadline,
-        bytes calldata signature
+        uint8 v,
+        bytes32 r,
+        bytes32 s
     ) external nonReentrant {
-        if (block.timestamp > deadline) revert SessionExpired();
-        bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(SESSION_TYPEHASH, player, key, budget, duration, sessionNonces[player]++, deadline))
-        );
-        if (!SignatureChecker.isValidSignatureNow(player, digest, signature)) revert NotPlayer();
+        bytes32 salt = _spenderSalt(player, key, duration);
+        address spender = Clones.predictDeterministicAddress(spenderImplementation, salt, address(this));
+        // Le permit peut déjà avoir été soumis par quelqu'un d'autre : seule l'autorisation compte.
+        try IERC20Permit(address(token)).permit(player, spender, budget, deadline, v, r, s) {} catch {}
+        if (token.allowance(player, spender) < budget || budget == 0) revert NotPlayer();
+        sessionNonces[player]++;
+        Clones.cloneDeterministic(spenderImplementation, salt);
         _openSession(player, key, budget, duration);
+        sessions[player].spender = spender;
     }
 
     function _openSession(address player, address key, uint256 budget, uint64 duration) internal {
@@ -256,6 +288,7 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
         s.key = key;
         s.expiresAt = uint64(block.timestamp) + duration;
         s.budget = budget;
+        s.spender = address(0);
         sessionOwner[key] = player;
         emit SessionOpened(player, key, budget, s.expiresAt);
     }
@@ -270,13 +303,20 @@ contract MiniJeuxArena is ReentrancyGuard, Ownable2Step, EIP712 {
     }
 
     /// @dev Appelé par une clé de session qui engage une mise : renvoie le joueur et décompte le budget.
-    function _spend(uint256 stake) internal returns (address player) {
+    function _spend(uint256 stake) internal returns (address player, address spender) {
         player = sessionOwner[msg.sender];
         if (player == address(0)) revert NotPlayer();
         Session storage s = sessions[player];
         if (block.timestamp > s.expiresAt) revert SessionExpired();
         if (stake > s.budget) revert BudgetExceeded();
         s.budget -= stake;
+        spender = s.spender;
+    }
+
+    /// @dev Prélève une mise sur le wallet du joueur, via le contrat de sa session s'il y en a un.
+    function _collect(address player, uint256 amount, address spender) internal {
+        if (spender == address(0)) token.safeTransferFrom(player, address(this), amount);
+        else SessionSpender(spender).pull(token, player, amount);
     }
 
     /// @dev Joueur au nom duquel agit l'appelant dans la partie `id` : lui-même, ou le joueur

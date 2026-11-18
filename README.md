@@ -26,22 +26,27 @@ Règles communes :
 
 **Avec le paymaster (sans ETH)**, quand `paymasterUrl`, `entryPoint` et `accountFactory` sont
 renseignés dans `frontend/config.js` :
-- **Connexion** : MetaMask demande d'autoriser le site, puis **deux signatures gratuites** la
-  toute première fois (autorisation du jeton, puis ouverture de la session), **une seule** ensuite.
-  Une signature n'est pas une transaction : elle ne coûte rien.
+- **Connexion** : MetaMask demande d'autoriser le site, puis **une seule signature gratuite**
+  (même la toute première fois). Une signature n'est pas une transaction : elle ne coûte rien.
 - **Ensuite, plus aucune fenêtre** : publier, relever un défi, jouer, révéler, abandonner,
   recevoir des jetons de test.
 - Le joueur n'a **besoin d'aucun ETH**, seulement du jeton de mise. Les frais de réseau sont
   payés par la plateforme via le paymaster Coinbase (CDP), au travers d'un « compte de jeu »
   ERC-4337 (SimpleAccount v0.7) contrôlé par la clé de session du navigateur.
 
-**Sans paymaster** (ou si le paymaster refuse une opération), le site revient à l'ancien
+Si le paymaster refuse une opération, le site affiche la raison (avec le nom de l'étape) et
+n'envoie **jamais** de transaction payante à la place.
+
+**Sans paymaster configuré** (essais en local sans `npm run bundler`), le site utilise l'ancien
 fonctionnement : une transaction pour ouvrir la session, qui envoie un peu d'ETH à la clé.
 
 La session autorise une clé jetable (ou le compte de jeu) avec un **budget de mises** (100 par
 défaut) et une **durée** (1, 7 ou 30 jours, 7 par défaut). Elle est ouverte soit par une
-transaction (`openSession`), soit par une signature EIP-712 du joueur (`openSessionBySig`,
-compatible avec les comptes MetaMask intelligents). La clé ne peut envoyer de l'argent que dans
+transaction (`openSession`), soit par **une seule signature** du joueur (`openSessionByPermit`) :
+un permit EIP-2612 du budget au profit d'un petit contrat de prélèvement propre à la session
+(`SessionSpender`, adresse donnée par `sessionSpender(joueur, clé, durée)`). Ce contrat ne sait
+que verser une mise à l'arène, sur ordre de l'arène ; son adresse dépend de la clé, de la durée
+et du numéro de session, donc la signature ne peut pas servir à ouvrir une autre session. La clé ne peut envoyer de l'argent que dans
 des parties : mises prélevées sur le wallet du joueur, gains et remboursements toujours versés
 au wallet du joueur. Elle ne peut ni retirer, ni dépasser son budget, ni prolonger la session.
 Après expiration, elle peut encore finir les parties en cours mais plus engager de mises.
