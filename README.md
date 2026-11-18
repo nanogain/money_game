@@ -121,7 +121,7 @@ On peut aussi déployer en ligne de commande : `PRIVATE_KEY=0x... npx hardhat ru
 - Jeton de test ARENETEST : [`0xe977639ADA11121eD56B699AdbE1067626a38dF3`](https://sepolia.basescan.org/address/0xe977639ADA11121eD56B699AdbE1067626a38dF3)
 - Fabrique de comptes de jeu : [`0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17`](https://sepolia.basescan.org/address/0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17)
 - Propriétaire (reçoit les 2 % par défaut) : `0x1290A4Ba39C7620d4Ff4F3a72a3A33d284AdFCF5`
-- Paymaster : pas encore configuré (`paymasterUrl` vide, les joueurs paient donc encore un peu d'ETH).
+- Paymaster : Coinbase CDP (adresse dans `frontend/config.js`, limitée aux 3 contrats ci-dessus), les joueurs n'ont pas besoin d'ETH.
 
 ETH de test gratuit : robinet Coinbase, https://portal.cdp.coinbase.com/onchain-tools/faucet
 (le robinet Alchemy exige de l'activité sur le réseau principal).
