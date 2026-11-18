@@ -5,12 +5,12 @@ window.NETWORKS = {
     "name": "Base Sepolia (réseau de test)",
     "rpc": "https://sepolia.base.org",
     "explorer": "https://sepolia.basescan.org",
-    "arena": "0xde99AAa6e81708322325E65A7FA8C82b66C17D18",
-    "usdc": "0xe977639ADA11121eD56B699AdbE1067626a38dF3",
+    "arena": "0xb1A2F551134e626ECA2B848C24530d809836bF1B",
+    "usdc": "0xC47637630D30590e6688291614166d0BCaD72e3B",
     "mockUsdc": true,
     "moveTimeout": 600,
     "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
-    "accountFactory": "0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17",
+    "accountFactory": "0x0991b6ba910731413e1D44C65067dD97317d52aD",
     "paymasterUrl": "https://api.developer.coinbase.com/rpc/v1/base-sepolia/IaODr1KXEfob5yccCgRPKLXPNaBacGAu"
   },
   "31337": {

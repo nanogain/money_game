@@ -120,12 +120,12 @@ Pour installer les contrats, sans partager aucune clé :
 
 On peut aussi déployer en ligne de commande : `PRIVATE_KEY=0x... npx hardhat run scripts/deploy.js --network baseSepolia`.
 
-### Déploiement actuel (Base Sepolia, 18/11/2026 : jeu sans ETH, frais automatiques)
+### Déploiement actuel (Base Sepolia, 18/11/2026 soir : une seule signature)
 
-- Contrat des mini-jeux : [`0xde99AAa6e81708322325E65A7FA8C82b66C17D18`](https://sepolia.basescan.org/address/0xde99AAa6e81708322325E65A7FA8C82b66C17D18)
-- Jeton de test ARENETEST : [`0xe977639ADA11121eD56B699AdbE1067626a38dF3`](https://sepolia.basescan.org/address/0xe977639ADA11121eD56B699AdbE1067626a38dF3)
-- Fabrique de comptes de jeu : [`0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17`](https://sepolia.basescan.org/address/0x5a43E08Dd7B2c778085c2C2Cd2E4d62833F6Ab17)
-- Propriétaire (reçoit les 2 % par défaut) : `0x1290A4Ba39C7620d4Ff4F3a72a3A33d284AdFCF5`
+- Contrat des mini-jeux : [`0xb1A2F551134e626ECA2B848C24530d809836bF1B`](https://sepolia.basescan.org/address/0xb1A2F551134e626ECA2B848C24530d809836bF1B)
+- Jeton de test ARENETEST : [`0xC47637630D30590e6688291614166d0BCaD72e3B`](https://sepolia.basescan.org/address/0xC47637630D30590e6688291614166d0BCaD72e3B)
+- Fabrique de comptes de jeu : [`0x0991b6ba910731413e1D44C65067dD97317d52aD`](https://sepolia.basescan.org/address/0x0991b6ba910731413e1D44C65067dD97317d52aD)
+- Propriétaire (reçoit les 2 % par défaut) : `0x032A5284Fc32fA6671Baaf9221dA8dc909Cf9B64`
 - Paymaster : Coinbase CDP (adresse dans `frontend/config.js`, limitée aux 3 contrats ci-dessus), les joueurs n'ont pas besoin d'ETH.
 
 ETH de test gratuit : robinet Coinbase, https://portal.cdp.coinbase.com/onchain-tools/faucet
