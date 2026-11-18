@@ -12,7 +12,8 @@ const ENTRYPOINT_ABI = [
 const DUMMY_SIG = new ethers.Wallet(ethers.id("arene-signature-factice")).signingKey.sign(ethers.id("estimation")).serialized;
 
 const aaEnabled = () => !!(APP_CONFIG.paymasterUrl && APP_CONFIG.entryPoint && APP_CONFIG.accountFactory);
-const hex = (v) => ethers.toBeHex(BigInt(v));
+// Quantités au format JSON-RPC (« 0x14a34 », sans zéro de tête) : CDP refuse « 0x014a34 ».
+const hex = (v) => ethers.toQuantity(BigInt(v));
 const pad16 = (v) => ethers.zeroPadValue(ethers.toBeHex(BigInt(v || 0)), 16);
 
 let rpcId = 0;
